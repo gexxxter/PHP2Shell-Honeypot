@@ -38,7 +38,7 @@ RULES = [(t, re.compile(p, re.I)) for t, p in [
     ("webshell-drop", rb"<\?php|<\?=|filename=\"?[^\"\r\n]*\.(php|phtml|phar)"),
     ("path-probe",    rb"(phpinfo|wp-login|xmlrpc|vendor/phpunit|/cgi-bin/|shell\.php|eval-stdin|wp-config)"),
     ("bait-hit",      rb"^[A-Z]+ /(\.env|backup\.sql|\.git|admin-old|config\.php\.bak|db_backup)"),
-    ("session-upload-progress", rb"PHP_SESSION_UPLOAD_PROGRESS"),   # the field that switches on PHP's session upload-progress tracking (reported upload route)
+    ("session-upload-progress", rb"PHP(?:_|\.| |%5f)SESSION(?:_|\.| |%5f)UPLOAD(?:_|\.| |%5f)PROGRESS"),   # the field that switches on PHP's session upload-progress tracking (reported upload route)
 ]]
 SCAN_BYTES = 524_288    # how much of a body the pattern rules read: bounds the CPU per request (the proxy is single-threaded); size tags still see the whole body
 HT_RE = re.compile(re.escape(HONEYTOKEN).encode(), re.I)
@@ -59,7 +59,8 @@ EXPLOIT_TAGS = {"cmd-exec", "shell-strings", "php-wrapper", "php-cgi-arg", "webs
                 "multipart-no-boundary", "multipart-long-boundary", "multipart-many-parts",
                 "multipart-unterminated", "multipart-nested", "oversized-body",
                 "content-length-mismatch", "te-cl-smuggling-shape", "honeytoken-reuse",
-                "session-upload-progress", "huge-field-name"}
+                "session-upload-progress", "huge-field-name", "multipart-no-length", "multipart-many-headers",
+                "multipart-many-empty-files", "multipart-deep-names"}
 
 
 def parse_request(raw: bytes):
@@ -80,6 +81,29 @@ def parse_request(raw: bytes):
         headers[k] = v.decode("latin-1", "replace").strip()
     version = parts[2] if len(parts) > 2 else ""
     return (parts[0] if parts else ""), (parts[1] if len(parts) > 1 else ""), version, reqline, headers, order, dup, body
+
+
+def multipart_oom_shapes(body: bytes, boundary: bytes) -> list:
+    """The multipart shapes the PHP advisory (GHSA-w8hw-w9fx-j79w) lists for reaching out-of-memory inside the request limits:
+    a part with very many headers, very many empty file fields (they do not count against max_file_uploads), deeply nested
+    field names. Bounded: at most 2 MB and 5000 parts are looked at."""
+    tags, empty_files, many_hdr, deep = [], 0, False, False
+    for part in body.split(b"--" + boundary, 5000)[1:]:
+        head = part.split(b"\r\n\r\n", 1)[0]
+        if head.count(b"\n") > 50:
+            many_hdr = True
+        if re.search(rb'filename=""', head[:2000]):
+            empty_files += 1
+        m = re.search(rb'name="([^"]{0,2000})"', head[:3000])
+        if m and m.group(1).count(b"[") > 8:
+            deep = True
+    if many_hdr:
+        tags.append("multipart-many-headers")
+    if empty_files > 50:
+        tags.append("multipart-many-empty-files")
+    if deep:
+        tags.append("multipart-deep-names")
+    return tags
 
 
 def analyze(method, path, headers, dup, body, truncated):
@@ -106,6 +130,9 @@ def analyze(method, path, headers, dup, body, truncated):
                 tags.append("multipart-unterminated")
             if b"multipart/" in body:
                 tags.append("multipart-nested")
+            tags += multipart_oom_shapes(body[:2_000_000], b)
+        if "content-length" not in headers:
+            tags.append("multipart-no-length")      # no usable declared length: skips the post_max_size pre-check (PHP advisory)
     if len(body) > 1_000_000 or truncated:
         tags.append("oversized-body")
     cl = headers.get("content-length", "")
