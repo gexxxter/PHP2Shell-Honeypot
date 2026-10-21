@@ -79,13 +79,14 @@ def raw_path(sha: str):
     return p if p.is_file() else None
 
 
-def raw_view(sha: str):
+def raw_view(sha: str, limit: int = VIEW_BYTES):
     p = raw_path(sha)
     if p is None:
         return None
+    limit = max(256, min(int(limit), VIEW_BYTES))      # inline previews ask for a few KB, the inspector for the full view
     size = p.stat().st_size
     with open(p, "rb") as f:
-        data = f.read(VIEW_BYTES)
+        data = f.read(limit)
     head, sep, body = data.partition(b"\r\n\r\n")
     if not sep:
         head, sep, body = data.partition(b"\n\n")
@@ -241,7 +242,11 @@ class Handler(BaseHTTPRequestHandler):
                 with open(p, "rb") as f:
                     self.wfile.write(f.read())
             else:
-                self.send(200, json.dumps(raw_view(sha)).encode(), "application/json")
+                try:
+                    limit = int(q.get("limit", [VIEW_BYTES])[0])
+                except ValueError:
+                    limit = VIEW_BYTES
+                self.send(200, json.dumps(raw_view(sha, limit)).encode(), "application/json")
         elif u.path in ("/", "/index.html"):
             self.send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
         else:

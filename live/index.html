@@ -51,6 +51,11 @@ a.lk{color:#6ea8ff;cursor:pointer;text-decoration:none}a.lk:hover{text-decoratio
 #mpre{margin:8px 0 0;overflow:auto;background:#0b0d11;border:1px solid var(--line);border-radius:6px;padding:10px;font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap;word-break:break-all;flex:1;min-height:200px}
 .btn{background:var(--card);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;text-decoration:none;display:inline-block}
 .btn.on{border-color:var(--blue)}
+.req{border-top:1px solid var(--line);padding:8px 0}
+.reqtop{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;font-size:12px;color:var(--mut);margin-bottom:4px}
+.reqtop b{color:var(--tx);font-weight:500}
+.chip{background:rgba(217,89,38,.2);color:#f0a07c;border-radius:4px;padding:0 6px}
+.reqpre{margin:0;background:#0b0d11;border:1px solid var(--line);border-radius:6px;padding:8px;font:12px/1.45 ui-monospace,monospace;white-space:pre-wrap;word-break:break-all;max-height:260px;overflow:auto}
 </style>
 </head>
 <body>
@@ -77,7 +82,7 @@ a.lk{color:#6ea8ff;cursor:pointer;text-decoration:none}a.lk:hover{text-decoratio
 
 <div class="card" style="margin-bottom:12px"><h2>Confirmed remote code execution</h2><div id="rce"></div></div>
 
-<div class="card" style="margin-bottom:12px"><h2>Newest exploit-like requests (click a request to inspect the raw HTTP)</h2><div id="recentreq"></div></div>
+<div class="card" style="margin-bottom:12px"><h2>Newest exploit-like requests: the raw HTTP request, as received</h2><div id="recentreq"></div></div>
 
 <div id="modal" role="dialog" aria-modal="true" aria-label="Request inspector">
   <div id="mbox">
@@ -194,6 +199,47 @@ $('bt-copy').addEventListener('click', async () => {
 });
 const metaOf = e => `${(e['@timestamp']||'').replace('T',' ').slice(0,19)} · ${e.src_ip||'?'} · ${(e.geo&&e.geo.country_iso_code)||e['geo.country_iso_code']||'?'}`;
 
+// ---- newest exploit-like requests, shown inline as the raw HTTP text. Each request is fetched once (cached) and its card is
+// kept between refreshes, so the list does not flicker or lose your scroll position every 4 seconds.
+const INLINE_BYTES = 6000;
+const rawCache = new Map(), reqNodes = new Map(); let reqShown = 10;
+function getRaw(sha){
+  if(!rawCache.has(sha)) rawCache.set(sha, fetch('/api/raw?sha=' + encodeURIComponent(sha) + '&limit=' + INLINE_BYTES)
+    .then(r => r.json()).catch(e => ({error: e.message})));
+  return rawCache.get(sha);
+}
+function buildReq(x){
+  const box = el('div','req'), top = el('div','reqtop');
+  const cc = (x.geo && x.geo.country_iso_code) || x['geo.country_iso_code'] || '';
+  top.appendChild(el('b', null, (x['@timestamp']||'').replace('T',' ').slice(0,19)));
+  top.appendChild(el('span', null, `${x.src_ip||'?'} ${cc}`));
+  top.appendChild(el('span', null, bytes(x.body_len||0) + ' body'));
+  (x.tags||[]).forEach(t => top.appendChild(el('span','chip',t)));
+  if(x.sha256) top.appendChild(lk('Open full / hex / download', x.sha256, metaOf(x)));
+  const pre = el('pre','reqpre', x.sha256 ? 'Loading request...' : (x.request_line || ''));
+  box.appendChild(top); box.appendChild(pre);
+  if(x.sha256) getRaw(x.sha256).then(d => {
+    if(d.error){ pre.textContent = '(raw request not available: ' + d.error + ')\n' + (x.request_line || ''); return; }
+    pre.textContent = d.head + (d.has_body_separator ? '\n\n' + d.body : '')
+      + (d.size > INLINE_BYTES ? `\n\n... ${bytes(d.size - INLINE_BYTES)} more: use "Open full" above` : '');
+  });
+  return box;
+}
+function renderRecent(list){
+  const root = clear($('recentreq'));
+  if(!list.length){ root.appendChild(el('div','empty','No exploit-like requests in this window.')); return; }
+  list.slice(0, reqShown).forEach(x => {
+    const key = (x.sha256 || x.request_line) + '|' + x['@timestamp'];
+    if(!reqNodes.has(key)) reqNodes.set(key, buildReq(x));
+    root.appendChild(reqNodes.get(key));
+  });
+  if(list.length > reqShown){
+    const b = el('button','btn','Show more (' + (list.length - reqShown) + ' further requests)');
+    b.addEventListener('click', () => { reqShown += 10; renderRecent(list); });
+    root.appendChild(b);
+  }
+}
+
 function fill(td, c){
   if(c && c.links){ if(!c.links.length) td.textContent = 'none found';
     c.links.forEach(l => { const d = el('div'); d.appendChild(l.sha ? lk(l.text, l.sha, l.meta) : document.createTextNode(l.text)); td.appendChild(d); }); }
@@ -251,9 +297,7 @@ function render(s){
   });
 
   // newest exploit-like requests, one click to the raw HTTP
-  table('recentreq', ['Time','Source','Request','Tags','Size'], (s.interesting||[]).map(x => [
-    (x['@timestamp']||'').replace('T',' ').slice(0,19), `${x.src_ip||'?'} ${(x.geo&&x.geo.country_iso_code)||''}`,
-    {text: x.request_line || `${x.method||''} ${x.path||''}`, sha: x.sha256, meta: metaOf(x)}, (x.tags||[]).join(', '), bytes(x.body_len||0)]));
+  renderRecent(s.interesting || []);
 
   // RCE list with suspected sources
   const rr = clear($('rce'));
