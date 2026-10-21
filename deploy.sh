@@ -109,6 +109,9 @@ log "preparing Elasticsearch (enrichment pipeline, 30-day retention, mappings)"
 if [ -n "$DOMAIN" ] && [ ! -f "$PROJ/certs/fullchain.pem" ]; then
     log "requesting a TLS certificate for $DOMAIN (DNS A record must already point to this VPS)"
     "$PROJ/scripts/get-cert.sh" "$DOMAIN" "$EMAIL" || echo "WARNING: certificate failed; continuing with HTTP only"
+    if [ -f "$PROJ/certs/fullchain.pem" ]; then
+        echo "17 3 * * 1 root $PROJ/scripts/renew-cert.sh $DOMAIN >> /var/log/php-honeypot-cert-renew.log 2>&1" | sudo tee /etc/cron.d/php-honeypot-cert-renew >/dev/null
+    fi
 fi
 
 log "writing .env"
@@ -144,13 +147,6 @@ log "importing the Kibana dashboard"
 for _ in $(seq 1 60); do curl -fsS -o /dev/null http://127.0.0.1:64296/api/status 2>/dev/null && break; sleep 5; done
 "$PROJ/scripts/kibana-import.sh" || echo "WARNING: Kibana import failed; re-run scripts/kibana-import.sh later"
 
-# cleanup of the resume machinery and the stored password
-if [ -f "/etc/systemd/system/$SERVICE.service" ]; then
-    sudo systemctl disable "$SERVICE.service" >/dev/null 2>&1 || true
-    sudo rm -f "/etc/systemd/system/$SERVICE.service"; sudo systemctl daemon-reload
-fi
-rm -f "$STATE"
-
 IP=$(curl -fsS https://api.ipify.org 2>/dev/null || echo "<vps-ip>")
 cat <<EOF
 
@@ -167,3 +163,12 @@ Reset the shop      scripts/reset-shop.sh [--db]
 Firewall: in your VPS provider's firewall, allow 80/443 (+ the other T-Pot honeypot ports you want exposed)
 from anywhere, and restrict 64295 and 64297 to your own IP.
 EOF
+
+# cleanup of the resume machinery and the stored password. Last on purpose: deleting the unit file while it runs
+# makes systemd fall back to default timeouts and kill this script, so nothing must come after it.
+if [ -f "/etc/systemd/system/$SERVICE.service" ]; then
+    sudo systemctl disable "$SERVICE.service" >/dev/null 2>&1 || true
+    sudo rm -f "/etc/systemd/system/$SERVICE.service"; sudo systemctl daemon-reload
+fi
+rm -f "$STATE"
+

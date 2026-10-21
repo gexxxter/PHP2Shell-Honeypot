@@ -140,6 +140,18 @@ def extract_iocs(body: bytes, path: str):
     return sorted(urls)[:10] + sorted(ips)[:10]
 
 
+def show(b: bytes) -> str:
+    """Readable rendering of attacker bytes for dashboards: CRLF -> newline, printable ASCII kept, the rest as \\xNN."""
+    out, i, n = [], 0, len(b)
+    while i < n:
+        c = b[i]
+        if c == 13 and i + 1 < n and b[i + 1] == 10:
+            out.append("\n"); i += 2; continue
+        out.append("\n" if c == 10 else chr(c) if (c == 9 or 32 <= c < 127) else "\\x%02x" % c)
+        i += 1
+    return "".join(out)
+
+
 def force_close(raw: bytes, src_ip: str, is_tls: bool) -> bytes:
     """Forwarded copy only: close after response (so we can relay until EOF) and pass the real client IP."""
     head, sep, body = raw.partition(b"\r\n\r\n")
@@ -227,6 +239,7 @@ def make_handler(is_tls: bool):
                 "read_ms": read_ms, "upstream_ms": up_ms, "upstream_status": status,
                 "upstream_empty": not resp, "sha256": sha,
                 "body_preview_b64": base64.b64encode(body[:512]).decode(),
+                "raw_size": len(raw), "request_text": show(raw[:8192]),   # first 8 KB, readable (full bytes: captures/<sha256>.bin)
             }
             with open(LOG_DIR / "events.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(event) + "\n")

@@ -43,6 +43,14 @@ td{padding:4px 6px 4px 0;border-top:1px solid var(--line);vertical-align:top;ove
 .err{color:var(--red);font-size:12px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
 .empty{color:var(--mut);font-size:12px}
+a.lk{color:#6ea8ff;cursor:pointer;text-decoration:none}a.lk:hover{text-decoration:underline}
+.click{cursor:pointer}.click:hover{background:rgba(255,255,255,.06)}
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center;padding:16px;z-index:1000}
+#modal.on{display:flex}
+#mbox{background:var(--card);border:1px solid var(--line);border-radius:10px;width:min(1100px,100%);max-height:92vh;display:flex;flex-direction:column;padding:12px}
+#mpre{margin:8px 0 0;overflow:auto;background:#0b0d11;border:1px solid var(--line);border-radius:6px;padding:10px;font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap;word-break:break-all;flex:1;min-height:200px}
+.btn{background:var(--card);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;text-decoration:none;display:inline-block}
+.btn.on{border-color:var(--blue)}
 </style>
 </head>
 <body>
@@ -68,6 +76,22 @@ td{padding:4px 6px 4px 0;border-top:1px solid var(--line);vertical-align:top;ove
 </div>
 
 <div class="card" style="margin-bottom:12px"><h2>Confirmed remote code execution</h2><div id="rce"></div></div>
+
+<div class="card" style="margin-bottom:12px"><h2>Newest exploit-like requests (click a request to inspect the raw HTTP)</h2><div id="recentreq"></div></div>
+
+<div id="modal" role="dialog" aria-modal="true" aria-label="Request inspector">
+  <div id="mbox">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <strong id="mtitle">Request</strong><span id="mmeta" class="empty"></span>
+      <span style="flex:1"></span>
+      <button class="btn on" id="bt-text">Text</button><button class="btn" id="bt-hex">Hex</button>
+      <button class="btn" id="bt-copy">Copy</button><a class="btn" id="bt-dl">Download raw</a>
+      <button class="btn" id="bt-x">Close</button>
+    </div>
+    <div id="mnote" class="empty" style="margin-top:6px"></div>
+    <pre id="mpre"></pre>
+  </div>
+</div>
 
 <div class="grid two" style="margin-bottom:12px">
   <div class="card"><h2>Requests over time</h2><div style="position:relative;height:220px"><canvas id="tl" role="img" aria-label="Stacked bars of requests over time, split into background and exploit-like"></canvas></div></div>
@@ -130,10 +154,56 @@ function bars(id, buckets, opts = {}){
   });
 }
 
+// ---- request inspector: shows the stored raw HTTP request (served by /api/raw from the capture proxy's files)
+let cur = null, view = 'text';
+function lk(text, sha, meta){
+  const a = el('a','lk',text); a.href = '#'; a.title = 'Inspect the raw request';
+  a.addEventListener('click', ev => { ev.preventDefault(); openInspector(sha, meta); });
+  return a;
+}
+function paint(){
+  if(!cur) return; const t = view === 'text';
+  $('bt-text').classList.toggle('on', t); $('bt-hex').classList.toggle('on', !t);
+  $('mpre').textContent = t ? cur.head + (cur.has_body_separator ? '\n\n' + cur.body : '') : cur.hex;
+  let n = `${bytes(cur.size)} in total` + (cur.has_body_separator ? `: headers, then a ${bytes(cur.body_size)} body` : ', no header/body separator found');
+  if(cur.truncated) n += `. Showing the first ${bytes(1e6)} only: download for the complete request.`;
+  if(!t && cur.hex_truncated) n += ` Hex shows the first ${bytes(16384)}.`;
+  n += ' Non-printable bytes are shown as \\xNN.';
+  $('mnote').textContent = n;
+}
+async function openInspector(sha, meta){
+  cur = null; $('modal').classList.add('on'); $('mtitle').textContent = 'Request ' + sha.slice(0,12);
+  $('mmeta').textContent = meta || ''; $('mpre').textContent = 'Loading...'; $('mnote').textContent = '';
+  $('bt-dl').href = '/api/raw?sha=' + encodeURIComponent(sha) + '&download=1';
+  try{
+    const r = await fetch('/api/raw?sha=' + encodeURIComponent(sha)); const d = await r.json();
+    if(d.error){ $('mpre').textContent = d.error + ' (the raw file may have been removed from the server)'; return; }
+    cur = d; paint();
+  }catch(e){ $('mpre').textContent = 'Could not load the request: ' + e.message; }
+}
+function closeInspector(){ $('modal').classList.remove('on'); cur = null; }
+$('bt-x').addEventListener('click', closeInspector);
+$('modal').addEventListener('click', ev => { if(ev.target === $('modal')) closeInspector(); });
+document.addEventListener('keydown', ev => { if(ev.key === 'Escape') closeInspector(); });
+$('bt-text').addEventListener('click', () => { view = 'text'; paint(); });
+$('bt-hex').addEventListener('click', () => { view = 'hex'; paint(); });
+$('bt-copy').addEventListener('click', async () => {
+  try{ await navigator.clipboard.writeText($('mpre').textContent); $('bt-copy').textContent = 'Copied'; }
+  catch(e){ $('bt-copy').textContent = 'Copy failed'; }
+  setTimeout(() => $('bt-copy').textContent = 'Copy', 1500);
+});
+const metaOf = e => `${(e['@timestamp']||'').replace('T',' ').slice(0,19)} · ${e.src_ip||'?'} · ${(e.geo&&e.geo.country_iso_code)||e['geo.country_iso_code']||'?'}`;
+
+function fill(td, c){
+  if(c && c.links){ if(!c.links.length) td.textContent = 'none found';
+    c.links.forEach(l => { const d = el('div'); d.appendChild(l.sha ? lk(l.text, l.sha, l.meta) : document.createTextNode(l.text)); td.appendChild(d); }); }
+  else if(c && c.sha){ td.appendChild(lk(c.text, c.sha, c.meta)); }
+  else td.textContent = String(c ?? '-');
+}
 function table(id, head, rows){
   const root = clear($(id)); if(!rows.length){ root.appendChild(el('div','empty','No data yet')); return; }
   const t = el('table'); const tr = el('tr'); head.forEach(h => tr.appendChild(el('th',null,h))); t.appendChild(tr);
-  rows.forEach(r => { const row = el('tr'); r.forEach(c => row.appendChild(el('td',null,String(c ?? '-')))); t.appendChild(row); });
+  rows.forEach(r => { const row = el('tr'); r.forEach(c => { const td = el('td'); fill(td, c); row.appendChild(td); }); t.appendChild(row); });
   root.appendChild(t);
 }
 
@@ -175,15 +245,22 @@ function render(s){
     const t = (e['@timestamp']||'').slice(11,19);
     const txt = e.kind==='request' ? `${t} ${e.src_ip} ${e.method} ${e.path}${(e.tags||[]).length?'  ['+e.tags.join(',')+']':''}`
       : `${t} ${e.kind} ${e.detail||e.signal||e.src_ip||''}`;
-    feed.appendChild(el('div',cls,txt));
+    const row = el('div', cls + (e.sha256 ? ' click' : ''), txt);
+    if(e.sha256){ row.title = 'Click to inspect the raw request'; row.addEventListener('click', () => openInspector(e.sha256, metaOf(e))); }
+    feed.appendChild(row);
   });
+
+  // newest exploit-like requests, one click to the raw HTTP
+  table('recentreq', ['Time','Source','Request','Tags','Size'], (s.interesting||[]).map(x => [
+    (x['@timestamp']||'').replace('T',' ').slice(0,19), `${x.src_ip||'?'} ${(x.geo&&x.geo.country_iso_code)||''}`,
+    {text: x.request_line || `${x.method||''} ${x.path||''}`, sha: x.sha256, meta: metaOf(x)}, (x.tags||[]).join(', '), bytes(x.body_len||0)]));
 
   // RCE list with suspected sources
   const rr = clear($('rce'));
   if(!s.rce.length) rr.appendChild(el('div','empty','No confirmed code execution yet.'));
   else table('rce',['Time','Type','Detail','Suspected source request(s), last 15 s before'],
     s.rce.map((e,i) => [ (e['@timestamp']||'').replace('T',' ').slice(0,19), e.rce_type, e.cmdline||e.file||(e.dest_ip? e.dest_ip+':'+e.dest_port:'')||e.detail,
-      (s.suspects[i]||[]).map(x => `${x.src_ip} ${(x.geo&&x.geo.country_iso_code)||''} ${x.request_line}`).join('\n') || 'none found' ]));
+      {links: (s.suspects[i]||[]).map(x => ({text: `${x.src_ip} ${(x.geo&&x.geo.country_iso_code)||''} ${x.request_line}`, sha: x.sha256, meta: metaOf(x)}))} ]));
 
   // timeline
   const tl = a.timeline.buckets; const labels = tl.map(b => new Date(b.key).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}));
@@ -211,7 +288,7 @@ function render(s){
   table('shapes',['Shape','IPs','ASNs','Avg size','First','Last','Sample'], a.shapes.buckets.map(b => {
     const h = (b.sample.hits.hits[0]||{})._source||{}, mp = h.multipart||{};
     return [b.key, b.ips.value, b.asns.value, bytes(b.avg_size.value), ago(b.first.value), ago(b.last.value),
-      (h.request_line||'') + (mp.parts!=null ? ` · ${mp.parts} parts${mp.has_terminator===false?', unterminated':''}` : '')]; }));
+      {text: (h.request_line||'(inspect)') + (mp.parts!=null ? ` · ${mp.parts} parts${mp.has_terminator===false?', unterminated':''}` : ''), sha: h.sha256, meta: 'sample of shape ' + b.key}]; }));
   table('ips',['IP','Country','Requests','Exploit-like','First seen','Last seen'], a.top_ips.buckets.map(b =>
     [b.key, (b.c.buckets[0]||{}).key, b.doc_count, b.x.doc_count, ago(b.first.value), ago(b.last.value)]));
 

@@ -8,7 +8,7 @@ Everything (page and API) requires HTTP basic auth. LIVE_USER and LIVE_PASSWORD 
 to start without them, so there is no unauthenticated mode. Basic auth is not encrypted on its own: keep using the
 SSH tunnel, or put TLS in front, before exposing this beyond loopback.
 """
-import base64, hmac, json, os, sys, threading, time, urllib.request
+import base64, hmac, json, os, re, sys, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -20,6 +20,10 @@ PASSWORD = os.environ.get("LIVE_PASSWORD", "")
 MAX_FAILS, FAIL_WINDOW = 8, 300          # lock out after 8 failed logins within 5 minutes (global: behind a tunnel every client is 127.0.0.1)
 _fails, _fails_lock = [], threading.Lock()
 HERE = Path(__file__).parent
+CAPTURE_DIR = Path(os.environ.get("CAPTURE_DIR", "/data/captures"))   # the capture proxy's raw request files (read-only mount)
+VIEW_BYTES = 1_000_000          # how much of a request the inspector renders as text
+HEX_BYTES = 16 * 1024           # how much it renders as a hex dump (the full file is always available as a download)
+SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 INDEX = "php2shell-*"
 WINDOWS = {"1h": ("now-1h", "1m"), "24h": ("now-24h", "30m"), "7d": ("now-7d", "6h"), "30d": ("now-30d", "1d")}
 
@@ -39,6 +43,57 @@ def terms(field, size=10, **sub):
     return d
 
 
+def show(b: bytes) -> str:
+    """Readable but lossless-ish rendering of attacker bytes: CRLF becomes a newline, printable ASCII stays,
+    everything else (including a lone CR, NUL, control and high bytes) is shown as an explicit \\xNN escape."""
+    out = []
+    i, n = 0, len(b)
+    while i < n:
+        c = b[i]
+        if c == 13 and i + 1 < n and b[i + 1] == 10:
+            out.append("\n"); i += 2; continue
+        if c == 10:
+            out.append("\n")
+        elif c == 9 or 32 <= c < 127:
+            out.append(chr(c))
+        else:
+            out.append("\\x%02x" % c)
+        i += 1
+    return "".join(out)
+
+
+def hexdump(b: bytes) -> str:
+    lines = []
+    for off in range(0, len(b), 16):
+        chunk = b[off:off + 16]
+        hx = " ".join("%02x" % c for c in chunk)
+        asc = "".join(chr(c) if 32 <= c < 127 else "." for c in chunk)
+        lines.append("%08x  %-47s  |%s|" % (off, hx, asc))
+    return "\n".join(lines)
+
+
+def raw_path(sha: str):
+    if not SHA_RE.match(sha or ""):
+        return None                                   # only a 64-char hex hash is ever turned into a filename
+    p = CAPTURE_DIR / (sha + ".bin")
+    return p if p.is_file() else None
+
+
+def raw_view(sha: str):
+    p = raw_path(sha)
+    if p is None:
+        return None
+    size = p.stat().st_size
+    with open(p, "rb") as f:
+        data = f.read(VIEW_BYTES)
+    head, sep, body = data.partition(b"\r\n\r\n")
+    if not sep:
+        head, sep, body = data.partition(b"\n\n")
+    return {"sha256": sha, "size": size, "truncated": size > len(data),
+            "head": show(head), "has_body_separator": bool(sep), "body_size": max(size - len(head) - len(sep), 0),
+            "body": show(body), "hex": hexdump(data[:HEX_BYTES]), "hex_truncated": size > HEX_BYTES}
+
+
 def state(window):
     gte, interval = WINDOWS.get(window, WINDOWS["24h"])
     rng = {"range": {"@timestamp": {"gte": gte}}}
@@ -46,7 +101,7 @@ def state(window):
     main = es(f"/{INDEX}/_search?ignore_unavailable=true", {
         "size": 300, "sort": [{"@timestamp": "desc"}], "track_total_hits": True,
         "_source": ["@timestamp", "kind", "src_ip", "geo", "asn.organization_name", "path", "method", "exploit_like",
-                    "tags", "rce_type", "detail", "signal", "shape_hash", "ua"],
+                    "tags", "rce_type", "detail", "signal", "shape_hash", "ua", "sha256", "request_line", "body_len"],
         "query": {"bool": {"filter": [rng]}},
         "aggs": {
             "kinds": terms("kind", 10, last={"max": {"field": "@timestamp"}}),
@@ -91,6 +146,10 @@ def state(window):
         "size": 20, "sort": [{"@timestamp": "desc"}],
         "query": {"bool": {"filter": [{"term": {"kind": "rce_confirmed"}}]}}})
     rce_hits = [h["_source"] for h in rce.get("hits", {}).get("hits", [])]
+    interesting = es(f"/{INDEX}/_search?ignore_unavailable=true", {         # newest exploit-like requests, for the inspector list
+        "size": 30, "sort": [{"@timestamp": "desc"}],
+        "_source": ["@timestamp", "src_ip", "geo.country_iso_code", "request_line", "method", "path", "tags", "body_len", "sha256", "shape_hash"],
+        "query": {"bool": {"filter": [rng, {"term": {"kind": "request"}}, exploit]}}})
     # suspected sources: requests in the 15 s before each confirmation (shared container, so it is a time correlation)
     suspects = []
     if rce_hits:
@@ -106,7 +165,8 @@ def state(window):
     return {"window": window, "now": None, "total": main["hits"]["total"]["value"],
             "recent": [h["_source"] for h in main["hits"]["hits"]], "aggs": main["aggregations"],
             "shape_first": firsts.get("aggregations", {}).get("s", {}).get("buckets", []),
-            "rce": rce_hits, "suspects": suspects}
+            "rce": rce_hits, "suspects": suspects,
+            "interesting": [h["_source"] for h in interesting.get("hits", {}).get("hits", [])]}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -164,6 +224,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, json.dumps(state(w)).encode(), "application/json")
             except Exception as e:
                 self.send(502, json.dumps({"error": str(e)}).encode(), "application/json")
+        elif u.path == "/api/raw":
+            q = parse_qs(u.query)
+            sha = q.get("sha", [""])[0]
+            p = raw_path(sha)
+            if p is None:
+                self.send(404, json.dumps({"error": "no stored request with that hash"}).encode(), "application/json")
+            elif q.get("download", ["0"])[0] == "1":
+                # attacker-controlled bytes: always an attachment, never rendered or executed by the browser
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Disposition", f'attachment; filename="request-{sha[:12]}.bin"')
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(p.stat().st_size))
+                self.end_headers()
+                with open(p, "rb") as f:
+                    self.wfile.write(f.read())
+            else:
+                self.send(200, json.dumps(raw_view(sha)).encode(), "application/json")
         elif u.path in ("/", "/index.html"):
             self.send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
         else:

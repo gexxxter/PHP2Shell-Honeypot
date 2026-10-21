@@ -118,8 +118,10 @@ services:
     environment:
       ES_URL: http://127.0.0.1:64298
       LIVE_PORT: "64300"
+      CAPTURE_DIR: /data/captures
       LIVE_USER: ${LIVE_USER:?set LIVE_USER in .env (deploy.sh does this)}
       LIVE_PASSWORD: ${LIVE_PASSWORD:?set LIVE_PASSWORD in .env, at least 8 characters}
+    volumes: [hpdata:/data:ro]        # raw requests, for the dashboard's request inspector
     read_only: true
     restart: unless-stopped
 
