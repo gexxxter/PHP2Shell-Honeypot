@@ -1,0 +1,3 @@
+# Keeps the alerts/*.yaml glob non-empty. Real alert configs go next to it (see slack.yaml.example).
+healthchecks:
+  enabled: false

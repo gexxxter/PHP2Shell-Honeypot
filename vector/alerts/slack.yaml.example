@@ -1,0 +1,44 @@
+# Optional Slack alerts. To enable:
+#   1. copy this file to slack.yaml (same folder)
+#   2. put SLACK_WEBHOOK_URL=... into .env
+#   3. docker compose restart vector
+# Alerts on (a) every confirmed RCE, (b) the first time each new exploit-like payload shape is seen.
+
+transforms:
+  alert_rce:
+    type: filter
+    inputs: [falco_events]
+    condition: '.kind == "rce_confirmed"'
+
+  alert_new_shape_candidates:
+    type: filter
+    inputs: [parse_json_events]
+    condition: '.kind == "request" && .exploit_like == true && is_string(.shape_hash)'
+
+  alert_new_shape:
+    type: dedupe
+    inputs: [alert_new_shape_candidates]
+    fields:
+      match: [shape_hash]
+    cache:
+      num_events: 5000
+
+  alert_format:
+    type: remap
+    inputs: [alert_rce, alert_new_shape]
+    source: |
+      if .kind == "rce_confirmed" {
+        .text = "RCE CONFIRMED (" + string!(.rce_type) + "): " + string!(.detail)
+      } else {
+        .text = "New exploit-like payload shape " + string!(.shape_hash) + " from " + string!(.src_ip) + " (" + string!(.request_line) + ")"
+      }
+      . = {"text": .text}
+
+sinks:
+  slack:
+    type: http
+    inputs: [alert_format]
+    uri: "${SLACK_WEBHOOK_URL}"
+    method: post
+    encoding:
+      codec: json

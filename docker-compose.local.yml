@@ -1,0 +1,18 @@
+# Local test override (Docker Desktop on Windows/macOS): talks to a locally running T-Pot Elasticsearch on the host.
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+# Live dashboard: http://localhost:64300   Shop via the capture proxy: http://localhost:8081
+services:
+  capture:
+    ports: !override ["8081:8080", "8444:8443"]
+  vector:
+    network_mode: !reset null
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    environment:
+      ES_ENDPOINT: http://host.docker.internal:64298
+  live:
+    network_mode: !reset null
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: ["64300:64300"]
+    environment:
+      ES_URL: http://host.docker.internal:64298
+      LIVE_BIND: 0.0.0.0

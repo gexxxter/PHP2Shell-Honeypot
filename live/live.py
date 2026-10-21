@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""
+Live dashboard backend (stdlib only). Serves index.html and /api/state, which runs aggregations
+against the php2shell-* indices in T-Pot's Elasticsearch and returns everything the page needs.
+Bound to 127.0.0.1 only: reach it through an SSH tunnel.
+"""
+import json, os, urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+ES = os.environ.get("ES_URL", "http://127.0.0.1:64298")
+PORT = int(os.environ.get("LIVE_PORT", "64300"))
+HERE = Path(__file__).parent
+INDEX = "php2shell-*"
+WINDOWS = {"1h": ("now-1h", "1m"), "24h": ("now-24h", "30m"), "7d": ("now-7d", "6h"), "30d": ("now-30d", "1d")}
+
+
+def es(path, body, ndjson=False):
+    data = body if ndjson else json.dumps(body)
+    req = urllib.request.Request(ES + path, data=data.encode(), method="POST",
+                                 headers={"Content-Type": "application/x-ndjson" if ndjson else "application/json"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read())
+
+
+def terms(field, size=10, **sub):
+    d = {"terms": {"field": field, "size": size}}
+    if sub:
+        d["aggs"] = sub
+    return d
+
+
+def state(window):
+    gte, interval = WINDOWS.get(window, WINDOWS["24h"])
+    rng = {"range": {"@timestamp": {"gte": gte}}}
+    exploit = {"term": {"exploit_like": True}}
+    main = es(f"/{INDEX}/_search?ignore_unavailable=true", {
+        "size": 300, "sort": [{"@timestamp": "desc"}], "track_total_hits": True,
+        "_source": ["@timestamp", "kind", "src_ip", "geo", "asn.organization_name", "path", "method", "exploit_like",
+                    "tags", "rce_type", "detail", "signal", "shape_hash", "ua"],
+        "query": {"bool": {"filter": [rng]}},
+        "aggs": {
+            "kinds": terms("kind", 10, last={"max": {"field": "@timestamp"}}),
+            "ips": {"cardinality": {"field": "src_ip"}},
+            "exploit": {"filter": exploit, "aggs": {"ips": {"cardinality": {"field": "src_ip"}}}},
+            "timeline": {"date_histogram": {"field": "@timestamp", "fixed_interval": interval},
+                         "aggs": {"x": {"filter": exploit}, "r": {"filter": {"term": {"kind": "rce_confirmed"}}}}},
+            "heat": {"date_histogram": {"field": "@timestamp", "fixed_interval": "1h"}},
+            "tags": terms("tags", 15),
+            "countries": terms("geo.country_name", 12, x={"filter": exploit}),
+            "asns": terms("asn.organization_name", 12, x={"filter": exploit}),
+            "ua_names": terms("ua_parsed.name", 10),
+            "ua_os": terms("ua_parsed.os.name", 8),
+            "methods": terms("method", 8),
+            "status": terms("upstream_status", 8),
+            "paths": terms("path", 12, x={"filter": exploit}),
+            "iocs": terms("iocs", 15),
+            "cred_users": terms("cred_user", 10),
+            "cred_pass": terms("cred_pass", 10),
+            "hdr": terms("header_hash", 8, ips={"cardinality": {"field": "src_ip"}}),
+            "tls": terms("tls_version", 5),
+            "sni": terms("sni", 5),
+            "top_ips": terms("src_ip", 12, x={"filter": exploit}, c={"terms": {"field": "geo.country_iso_code", "size": 1}},
+                             first={"min": {"field": "@timestamp"}}, last={"max": {"field": "@timestamp"}}),
+            "shapes": terms("shape_hash", 10, ips={"cardinality": {"field": "src_ip"}},
+                            asns={"cardinality": {"field": "asn.organization_name"}},
+                            first={"min": {"field": "@timestamp"}}, last={"max": {"field": "@timestamp"}},
+                            avg_size={"avg": {"field": "body_len"}},
+                            sample={"top_hits": {"size": 1, "_source": ["request_line", "tags", "multipart", "sha256"]}}),
+            "body_bytes": {"sum": {"field": "body_len"}},
+            "latency": {"percentiles": {"field": "upstream_ms", "percents": [50, 95, 99]}},
+            "empty_resp": {"filter": {"term": {"upstream_empty": True}}},
+            "bait": {"filter": {"term": {"tags": "bait-hit"}}},
+            "creds": {"filter": {"term": {"tags": "credential-attempt"}}},
+            "ht_reuse": {"filter": {"term": {"tags": "honeytoken-reuse"}}},
+        }})
+    # all-time first-seen per payload shape, to count genuinely new shapes in the window
+    firsts = es(f"/{INDEX}/_search?ignore_unavailable=true", {
+        "size": 0, "query": {"term": {"exploit_like": True}},
+        "aggs": {"s": {"terms": {"field": "shape_hash", "size": 1000}, "aggs": {"first": {"min": {"field": "@timestamp"}}}}}})
+    rce = es(f"/{INDEX}/_search?ignore_unavailable=true", {
+        "size": 20, "sort": [{"@timestamp": "desc"}],
+        "query": {"bool": {"filter": [{"term": {"kind": "rce_confirmed"}}]}}})
+    rce_hits = [h["_source"] for h in rce.get("hits", {}).get("hits", [])]
+    # suspected sources: requests in the 15 s before each confirmation (shared container, so it is a time correlation)
+    suspects = []
+    if rce_hits:
+        nd = ""
+        for h in rce_hits:
+            nd += json.dumps({"index": INDEX, "ignore_unavailable": True}) + "\n"
+            nd += json.dumps({"size": 4, "sort": [{"exploit_like": "desc"}, {"@timestamp": "desc"}],
+                              "_source": ["@timestamp", "src_ip", "geo", "request_line", "shape_hash", "tags", "sha256"],
+                              "query": {"bool": {"filter": [{"term": {"kind": "request"}}, {"range": {"@timestamp": {
+                                  "gte": h["@timestamp"] + "||-15s", "lte": h["@timestamp"]}}}]}}}) + "\n"
+        resp = es("/_msearch", nd, ndjson=True)
+        suspects = [[x["_source"] for x in r.get("hits", {}).get("hits", [])] for r in resp.get("responses", [])]
+    return {"window": window, "now": None, "total": main["hits"]["total"]["value"],
+            "recent": [h["_source"] for h in main["hits"]["hits"]], "aggs": main["aggregations"],
+            "shape_first": firsts.get("aggregations", {}).get("s", {}).get("buckets", []),
+            "rce": rce_hits, "suspects": suspects}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def send(self, code, body, ctype):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        if u.path == "/api/state":
+            try:
+                w = parse_qs(u.query).get("w", ["24h"])[0]
+                self.send(200, json.dumps(state(w)).encode(), "application/json")
+            except Exception as e:
+                self.send(502, json.dumps({"error": str(e)}).encode(), "application/json")
+        elif u.path in ("/", "/index.html"):
+            self.send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
+        else:
+            self.send(404, b"not found", "text/plain")
+
+
+if __name__ == "__main__":
+    print(f"live dashboard on 127.0.0.1:{PORT} (ES {ES})", flush=True)
+    ThreadingHTTPServer((os.environ.get("LIVE_BIND", "127.0.0.1"), PORT), Handler).serve_forever()

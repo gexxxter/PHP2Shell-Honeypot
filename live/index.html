@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>php-Honeypot live</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{--bg:#0f1115;--card:#171a21;--line:#262b36;--tx:#e6e8ee;--mut:#8b93a7;--blue:#3987e5;--org:#d95926;--red:#e66767;--grn:#199e70;--yel:#c98500}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.5 system-ui,sans-serif;padding:16px}
+h1{font-size:18px;font-weight:500;margin:0}
+h2{font-size:13px;font-weight:500;color:var(--mut);margin:0 0 8px;text-transform:none}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px;justify-content:space-between;margin-bottom:12px}
+.ctl{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--mut)}
+select{background:var(--card);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 8px}
+.grid{display:grid;gap:12px}
+.kpis{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:0}
+.kpi .v{font-size:24px;font-weight:500;font-variant-numeric:tabular-nums}
+.kpi .l{font-size:12px;color:var(--mut)}
+.kpi.bad .v{color:var(--red)}
+.two{grid-template-columns:minmax(0,3fr) minmax(0,2fr)}
+.three{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+@media(max-width:800px){.two{grid-template-columns:1fr}}
+#map{height:340px;border-radius:8px;background:#111}
+.dark-tiles{filter:invert(1) hue-rotate(180deg) brightness(.85) contrast(.9)}
+.feed{height:340px;overflow:auto;font:12px/1.5 ui-monospace,monospace}
+.feed div{padding:2px 0;border-bottom:1px solid var(--line);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.t-rce{color:var(--red)}.t-ex{color:var(--org)}.t-crash{color:var(--yel)}.t-n{color:var(--mut)}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{color:var(--mut);font-weight:400;text-align:left;padding:4px 6px 4px 0}
+td{padding:4px 6px 4px 0;border-top:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere;white-space:pre-wrap}
+.bar{display:flex;align-items:center;gap:8px;font-size:12px;margin:3px 0}
+.bar .n{flex:0 0 40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar .b{flex:1;background:var(--line);border-radius:3px;height:8px;position:relative}
+.bar .b i{position:absolute;left:0;top:0;bottom:0;background:var(--blue);border-radius:3px}
+.bar .b i.x{background:var(--org)}
+.bar .c{flex:0 0 52px;text-align:right;color:var(--mut);font-variant-numeric:tabular-nums}
+.heat{display:grid;grid-template-columns:28px repeat(24,1fr);gap:2px;font-size:10px;color:var(--mut)}
+.heat div{height:14px;border-radius:2px}
+.funnel .row{margin:6px 0}
+.err{color:var(--red);font-size:12px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.empty{color:var(--mut);font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>php-Honeypot live</h1>
+  <div class="ctl">
+    <span id="health"></span>
+    <label>Window <select id="win"><option>1h</option><option selected>24h</option><option>7d</option><option>30d</option></select></label>
+    <span id="upd"></span>
+  </div>
+</header>
+<div id="err" class="err"></div>
+
+<div class="grid kpis" id="kpis"></div>
+
+<div class="grid two" style="margin-bottom:12px">
+  <div class="card"><h2>Where attacks come from (last 300 events)</h2><div id="map"></div>
+    <div style="font-size:11px;color:var(--mut);margin-top:6px">
+      <span class="dot" style="background:#8b93a7"></span>scan
+      <span class="dot" style="background:#d95926;margin-left:10px"></span>exploit-like
+      <span class="dot" style="background:#e66767;margin-left:10px"></span>suspected RCE source</div></div>
+  <div class="card"><h2>Live feed</h2><div class="feed" id="feed"></div></div>
+</div>
+
+<div class="card" style="margin-bottom:12px"><h2>Confirmed remote code execution</h2><div id="rce"></div></div>
+
+<div class="grid two" style="margin-bottom:12px">
+  <div class="card"><h2>Requests over time</h2><div style="position:relative;height:220px"><canvas id="tl" role="img" aria-label="Stacked bars of requests over time, split into background and exploit-like"></canvas></div></div>
+  <div class="card funnel"><h2>Funnel: scan to RCE</h2><div id="funnel"></div></div>
+</div>
+
+<div class="grid three" style="margin-bottom:12px">
+  <div class="card"><h2>Top countries (orange = exploit-like)</h2><div id="countries"></div></div>
+  <div class="card"><h2>Top networks (ASN)</h2><div id="asns"></div></div>
+  <div class="card"><h2>Tags</h2><div id="tags"></div></div>
+  <div class="card"><h2>Paths requested</h2><div id="paths"></div></div>
+  <div class="card"><h2>User-agent families</h2><div id="uas"></div></div>
+  <div class="card"><h2>Operating systems claimed</h2><div id="uaos"></div></div>
+  <div class="card"><h2>Header-order fingerprints (distinct IPs)</h2><div id="hdr"></div></div>
+  <div class="card"><h2>HTTP methods</h2><div id="methods"></div></div>
+  <div class="card"><h2>Shop response codes</h2><div id="status"></div></div>
+  <div class="card"><h2>TLS versions / SNI</h2><div id="tls"></div></div>
+  <div class="card"><h2>Logins tried: usernames</h2><div id="cu"></div></div>
+  <div class="card"><h2>Logins tried: passwords</h2><div id="cp"></div></div>
+</div>
+
+<div class="grid two" style="margin-bottom:12px">
+  <div class="card"><h2>Payload shapes (campaigns)</h2><div id="shapes"></div></div>
+  <div class="card"><h2>Extracted IOCs (URLs and IPs in payloads)</h2><div id="iocs"></div>
+    <h2 style="margin-top:14px">Top source IPs</h2><div id="ips"></div></div>
+</div>
+
+<div class="grid two" style="margin-bottom:12px">
+  <div class="card"><h2>Activity by weekday and hour (UTC)</h2><div id="heat"></div></div>
+  <div class="card"><h2>Sensor health</h2><div id="healthcard"></div></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// Everything that comes from the data is attacker-controlled: only ever insert it with textContent.
+const $ = id => document.getElementById(id);
+const fmt = n => (n == null ? '-' : Math.round(n).toLocaleString());
+const bytes = n => n > 1e9 ? (n/1e9).toFixed(1)+' GB' : n > 1e6 ? (n/1e6).toFixed(1)+' MB' : n > 1e3 ? (n/1e3).toFixed(1)+' kB' : Math.round(n)+' B';
+function el(tag, cls, text){ const e = document.createElement(tag); if(cls) e.className = cls; if(text != null) e.textContent = text; return e; }
+function clear(n){ while(n.firstChild) n.removeChild(n.firstChild); return n; }
+function ago(ts){ if(!ts) return 'never'; const s = (Date.now()-new Date(ts))/1000; return s<90?Math.round(s)+'s ago':s<5400?Math.round(s/60)+' min ago':s<172800?Math.round(s/3600)+' h ago':Math.round(s/86400)+' d ago'; }
+
+const map = L.map('map',{worldCopyJump:true}).setView([25,10],2);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap contributors',maxZoom:8,className:'dark-tiles'}).addTo(map);
+const layer = L.layerGroup().addTo(map);
+let chart;
+
+function bars(id, buckets, opts = {}){
+  const root = clear($(id)); if(!buckets || !buckets.length){ root.appendChild(el('div','empty','No data yet')); return; }
+  const max = Math.max(...buckets.map(b => b.doc_count)) || 1;
+  buckets.forEach(b => {
+    const row = el('div','bar'); const name = String(b.key_as_string ?? b.key);
+    const n = el('div','n', name); n.title = name; row.appendChild(n);
+    const bar = el('div','b'); const i = el('i'); i.style.width = (100*b.doc_count/max)+'%'; bar.appendChild(i);
+    if(b.x){ const x = el('i','x'); x.style.width = (100*b.x.doc_count/max)+'%'; bar.appendChild(x); }
+    row.appendChild(bar);
+    row.appendChild(el('div','c', opts.value ? opts.value(b) : fmt(b.doc_count)));
+    root.appendChild(row);
+  });
+}
+
+function table(id, head, rows){
+  const root = clear($(id)); if(!rows.length){ root.appendChild(el('div','empty','No data yet')); return; }
+  const t = el('table'); const tr = el('tr'); head.forEach(h => tr.appendChild(el('th',null,h))); t.appendChild(tr);
+  rows.forEach(r => { const row = el('tr'); r.forEach(c => row.appendChild(el('td',null,String(c ?? '-')))); t.appendChild(row); });
+  root.appendChild(t);
+}
+
+function render(s){
+  const a = s.aggs, kind = {}; (a.kinds.buckets||[]).forEach(b => kind[b.key] = b);
+  const req = kind.request ? kind.request.doc_count : 0, rce = kind.rce_confirmed ? kind.rce_confirmed.doc_count : 0;
+  const crash = kind.php_crash ? kind.php_crash.doc_count : 0, decoy = kind.decoy_connect ? kind.decoy_connect.doc_count : 0;
+  const winStart = Date.now() - ({'1h':3.6e6,'24h':8.64e7,'7d':6.048e8,'30d':2.592e9}[s.window]);
+  const newShapes = (s.shape_first||[]).filter(b => b.first.value >= winStart).length;
+  const k = [
+    ['Requests', req], ['Unique source IPs', a.ips.value], ['Exploit-like', a.exploit.doc_count, a.exploit.doc_count>0],
+    ['Exploit-like IPs', a.exploit.ips.value], ['RCE confirmed', rce, rce>0], ['PHP worker crashes', crash, crash>0],
+    ['New payload shapes', newShapes], ['Bait files hit', a.bait.doc_count], ['Login attempts', a.creds.doc_count],
+    ['Honeytoken reuse', a.ht_reuse.doc_count, a.ht_reuse.doc_count>0], ['Decoy DB connections', decoy, decoy>0],
+    ['Data received', null, false, bytes(a.body_bytes.value)],
+    ['Shop latency p50 / p95 (ms)', null, false, fmt(a.latency.values['50.0'])+' / '+fmt(a.latency.values['95.0'])],
+    ['Empty upstream replies', a.empty_resp.doc_count]
+  ];
+  const kp = clear($('kpis'));
+  k.forEach(([l,v,bad,txt]) => { const c = el('div','card kpi'+(bad?' bad':'')); c.appendChild(el('div','v',txt ?? fmt(v))); c.appendChild(el('div','l',l)); kp.appendChild(c); });
+
+  // map: one marker per source IP
+  layer.clearLayers(); const seen = {};
+  const suspectIps = new Set((s.suspects||[]).flat().map(x => x.src_ip));
+  s.recent.forEach(e => {
+    const g = e.geo && e.geo.location; if(!g || !e.src_ip) return;
+    const key = e.src_ip; const sus = suspectIps.has(key);
+    const col = sus ? '#e66767' : e.exploit_like ? '#d95926' : '#8b93a7';
+    if(seen[key] && !(sus || (e.exploit_like && !seen[key].ex))) return;
+    seen[key] = {ex: e.exploit_like};
+    const m = L.circleMarker([g.lat,g.lon],{radius: sus?9:e.exploit_like?6:4,color:col,fillColor:col,fillOpacity:.6,weight:1}).addTo(layer);
+    m.bindTooltip(String(e.src_ip)+' · '+String((e.geo&&e.geo.country_name)||'?')+' · '+String(e.path||e.kind));
+  });
+
+  // feed
+  const feed = clear($('feed'));
+  s.recent.slice(0,80).forEach(e => {
+    const cls = e.kind==='rce_confirmed'?'t-rce':e.kind==='php_crash'?'t-crash':e.exploit_like?'t-ex':'t-n';
+    const t = (e['@timestamp']||'').slice(11,19);
+    const txt = e.kind==='request' ? `${t} ${e.src_ip} ${e.method} ${e.path}${(e.tags||[]).length?'  ['+e.tags.join(',')+']':''}`
+      : `${t} ${e.kind} ${e.detail||e.signal||e.src_ip||''}`;
+    feed.appendChild(el('div',cls,txt));
+  });
+
+  // RCE list with suspected sources
+  const rr = clear($('rce'));
+  if(!s.rce.length) rr.appendChild(el('div','empty','No confirmed code execution yet.'));
+  else table('rce',['Time','Type','Detail','Suspected source request(s), last 15 s before'],
+    s.rce.map((e,i) => [ (e['@timestamp']||'').replace('T',' ').slice(0,19), e.rce_type, e.cmdline||e.file||(e.dest_ip? e.dest_ip+':'+e.dest_port:'')||e.detail,
+      (s.suspects[i]||[]).map(x => `${x.src_ip} ${(x.geo&&x.geo.country_iso_code)||''} ${x.request_line}`).join('\n') || 'none found' ]));
+
+  // timeline
+  const tl = a.timeline.buckets; const labels = tl.map(b => new Date(b.key).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}));
+  const bg = tl.map(b => b.doc_count - b.x.doc_count), ex = tl.map(b => b.x.doc_count), rc = tl.map(b => b.r.doc_count);
+  const tc = '#8b93a7', gc = 'rgba(128,128,128,.15)';
+  if(chart){ chart.data.labels = labels; chart.data.datasets[0].data = bg; chart.data.datasets[1].data = ex; chart.data.datasets[2].data = rc; chart.update('none'); }
+  else chart = new Chart($('tl'),{type:'bar',data:{labels,datasets:[
+    {label:'Background',data:bg,backgroundColor:'#3987e5',stack:'s'},{label:'Exploit-like',data:ex,backgroundColor:'#d95926',stack:'s'},{label:'RCE confirmed',data:rc,backgroundColor:'#e66767',stack:'s'}]},
+    options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{labels:{color:tc,boxWidth:10}}},
+      scales:{x:{stacked:true,ticks:{color:tc,maxTicksLimit:8},grid:{display:false}},y:{stacked:true,ticks:{color:tc},grid:{color:gc}}}}});
+
+  // funnel
+  const fr = clear($('funnel')); const fm = Math.max(req,1);
+  [['Requests',req,'#3987e5'],['Exploit-like',a.exploit.doc_count,'#d95926'],['PHP worker crashed',crash,'#c98500'],['RCE confirmed',rce,'#e66767']].forEach(([l,v,c]) => {
+    const row = el('div','row'); row.appendChild(el('div',null,`${l}: ${fmt(v)}`));
+    const b = el('div','bar'); const bb = el('div','b'); const i = el('i'); i.style.width = Math.max(1,100*v/fm)+'%'; i.style.background = c; bb.appendChild(i); b.appendChild(bb); row.appendChild(b); fr.appendChild(row);
+  });
+  fr.appendChild(el('div','empty', req ? `Exploit-like share: ${(100*a.exploit.doc_count/req).toFixed(2)}%` : ''));
+
+  bars('countries', a.countries.buckets); bars('asns', a.asns.buckets); bars('tags', a.tags.buckets); bars('paths', a.paths.buckets);
+  bars('uas', a.ua_names.buckets); bars('uaos', a.ua_os.buckets); bars('methods', a.methods.buckets); bars('status', a.status.buckets);
+  bars('hdr', a.hdr.buckets, {value: b => fmt(b.ips.value)+' IPs'});
+  bars('tls', [...a.tls.buckets, ...a.sni.buckets]); bars('cu', a.cred_users.buckets); bars('cp', a.cred_pass.buckets); bars('iocs', a.iocs.buckets);
+
+  table('shapes',['Shape','IPs','ASNs','Avg size','First','Last','Sample'], a.shapes.buckets.map(b => {
+    const h = (b.sample.hits.hits[0]||{})._source||{}, mp = h.multipart||{};
+    return [b.key, b.ips.value, b.asns.value, bytes(b.avg_size.value), ago(b.first.value), ago(b.last.value),
+      (h.request_line||'') + (mp.parts!=null ? ` · ${mp.parts} parts${mp.has_terminator===false?', unterminated':''}` : '')]; }));
+  table('ips',['IP','Country','Requests','Exploit-like','First seen','Last seen'], a.top_ips.buckets.map(b =>
+    [b.key, (b.c.buckets[0]||{}).key, b.doc_count, b.x.doc_count, ago(b.first.value), ago(b.last.value)]));
+
+  // heatmap weekday x hour
+  const grid = Array.from({length:7},()=>Array(24).fill(0)); let hm = 1;
+  a.heat.buckets.forEach(b => { const d = new Date(b.key); grid[d.getUTCDay()][d.getUTCHours()] += b.doc_count; });
+  grid.forEach(r => r.forEach(v => hm = Math.max(hm,v)));
+  const hr = clear($('heat')); const hg = el('div','heat'); hg.appendChild(el('div'));
+  for(let h=0;h<24;h++) hg.appendChild(el('div',null,h%3===0?String(h):''));
+  ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].forEach((d,i) => { hg.appendChild(el('div',null,d));
+    grid[i].forEach(v => { const c = el('div'); c.style.background = v ? `rgba(57,135,229,${0.15+0.85*v/hm})` : 'var(--line)'; c.title = v+' events'; hg.appendChild(c); }); });
+  hr.appendChild(hg);
+
+  // health
+  const hc = clear($('healthcard')); const now = Date.now(); let stale = false;
+  [['request','Capture proxy'],['rce_confirmed','Falco (RCE rules)'],['php_crash','Shop log reader'],['decoy_connect','Decoy DB']].forEach(([key,label]) => {
+    const b = kind[key]; const row = el('div','bar'); row.appendChild(el('div','n',label));
+    row.appendChild(el('div','c', b ? 'last event '+ago(b.last.value) : 'no events (normal until triggered)')); hc.appendChild(row); });
+  hc.appendChild(el('div','empty','Falco, crash and decoy events only appear when something happens. A silent proxy for hours is the one to watch.'));
+  const lastReq = kind.request && kind.request.last.value; stale = !lastReq || (now - lastReq) > 3600e3;
+  $('health').textContent = stale ? 'no recent requests' : 'receiving data';
+  $('health').style.color = stale ? 'var(--yel)' : 'var(--grn)';
+  $('upd').textContent = 'updated ' + new Date().toLocaleTimeString();
+}
+
+async function tick(){
+  try{
+    const r = await fetch('/api/state?w='+$('win').value); const s = await r.json();
+    if(s.error){ $('err').textContent = 'Backend error: ' + s.error; return; }
+    $('err').textContent = ''; render(s);
+  }catch(e){ $('err').textContent = 'Fetch failed: ' + e.message; }
+}
+$('win').addEventListener('change', tick);
+tick(); setInterval(tick, 4000);
+</script>
+</body>
+</html>

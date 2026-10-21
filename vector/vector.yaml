@@ -1,0 +1,81 @@
+data_dir: /var/lib/vector
+
+sources:
+  requests:
+    type: file
+    include: ["/data/logs/events.jsonl"]
+    read_from: beginning
+  decoy:
+    type: file
+    include: ["/data/logs/decoy.jsonl"]
+    read_from: beginning
+  falco:
+    type: file
+    include: ["/falco/events.json"]
+    read_from: beginning
+  shop_logs:
+    type: docker_logs
+    include_containers: ["realphp"]
+
+transforms:
+  parse_json_events:
+    type: remap
+    inputs: [requests, decoy]
+    source: |
+      . = parse_json!(.message)
+      .@timestamp = del(.ts)
+
+  falco_events:
+    type: remap
+    inputs: [falco]
+    source: |
+      f = parse_json!(.message)
+      tags = array(f.tags) ?? []
+      rce_type = "outbound"
+      if includes(tags, "process") { rce_type = "process" }
+      if includes(tags, "file") { rce_type = "file_write" }
+      of = object(f.output_fields) ?? {}
+      . = {}
+      .@timestamp = f.time
+      .kind = "rce_confirmed"
+      .rule = f.rule
+      .priority = f.priority
+      .detail = f.output
+      .rce_type = rce_type
+      .cmdline = get!(of, ["proc.cmdline"])
+      .file = get!(of, ["fd.name"])
+      .proc_parent = get!(of, ["proc.pname"])
+      # failed connects (egress is blocked) carry the attempted address only in the event args: "addr=203.0.113.9:80"
+      dest = parse_regex(string(f.output) ?? "", r'addr=(?P<ip>\S+):(?P<port>\d+)') ?? {}
+      .dest_ip = dest.ip
+      .dest_port = to_int(dest.port) ?? null
+      .exploit_like = true
+      .tags = ["rce_confirmed"]
+
+  shop_crashes:
+    type: remap
+    inputs: [shop_logs]
+    source: |
+      # Apache logs "child pid N exit signal Segmentation fault (11)" when a PHP worker dies.
+      # A memory-corruption exploit that misfires lands here: an exploit attempt that reached PHP but did not (cleanly) succeed.
+      m = parse_regex(.message, r'child pid (?P<pid>\d+) exit signal (?P<signal>[A-Za-z ]+) \((?P<signo>\d+)\)') ?? null
+      if m == null { abort }
+      . = {
+        "@timestamp": .timestamp,
+        "kind": "php_crash",
+        "signal": m.signal,
+        "exploit_like": true,
+        "tags": ["php-worker-crash"]
+      }
+
+sinks:
+  elasticsearch:
+    type: elasticsearch
+    inputs: [parse_json_events, falco_events, shop_crashes]
+    endpoints: ["${ES_ENDPOINT:-http://127.0.0.1:64298}"]
+    mode: bulk
+    pipeline: php2shell-enrich
+    bulk:
+      index: "php2shell-%Y.%m.%d"
+    healthcheck:
+      enabled: false

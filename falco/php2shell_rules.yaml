@@ -1,0 +1,39 @@
+# Self-contained rules (the default Falco ruleset is not loaded). Matches only the `realphp` container.
+# Any event here means code is running inside the shop container that the shop itself would never run.
+
+- macro: realphp
+  condition: container.name = "realphp"
+
+- macro: spawned
+  condition: evt.type in (execve, execveat)
+
+- macro: open_write
+  condition: evt.type in (open, openat, openat2, creat) and evt.is_open_write = true and fd.typechar = 'f' and fd.num >= 0
+
+- macro: executable_name
+  condition: >
+    (fd.name endswith ".php" or fd.name endswith ".phtml" or fd.name endswith ".phar" or
+     fd.name endswith ".sh" or fd.name endswith ".py" or fd.name endswith ".pl" or fd.name endswith ".so")
+
+- rule: PHP2SHELL process spawned by Apache
+  desc: Apache/PHP started a child process. The shop never does this. Strong RCE indicator.
+  condition: spawned and realphp and (proc.pname = apache2 or proc.aname[2] = apache2) and proc.name != apache2
+  output: "RCE_CONFIRMED process (cmd=%proc.cmdline parent=%proc.pname user=%user.name)"
+  priority: CRITICAL
+  tags: [php2shell, rce_confirmed, process]
+
+- rule: PHP2SHELL executable file written by Apache
+  desc: Apache/PHP wrote a script or binary to disk, i.e. a likely webshell or payload drop.
+  condition: open_write and realphp and proc.name = apache2 and fd.name startswith /var/www and executable_name
+  output: "RCE_CONFIRMED file_write (file=%fd.name proc=%proc.name)"
+  priority: CRITICAL
+  tags: [php2shell, rce_confirmed, file]
+
+- rule: PHP2SHELL outbound connection from Apache
+  desc: Apache/PHP tried to open an outbound connection (reverse shell or payload fetch). Egress is blocked, so the connect usually fails; the attempted destination is in the event args.
+  condition: >
+    evt.type = connect and realphp and proc.name = apache2 and fd.typechar in (4, 6)
+    and not fd.sip in ("127.0.0.1", "127.0.0.11", "::1") and not fd.sport in (53, 3306)
+  output: "RCE_CONFIRMED outbound (dest=%fd.sip:%fd.sport args=%evt.args proc=%proc.name)"
+  priority: CRITICAL
+  tags: [php2shell, rce_confirmed, network]

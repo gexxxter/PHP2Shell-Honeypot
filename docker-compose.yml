@@ -1,0 +1,133 @@
+# php-Honeypot add-on for T-Pot. Run it on the same VPS, AFTER scripts/prepare-tpot.sh and scripts/setup.sh.
+#
+#   attacker -> capture (raw capture, :80/:443) -> realphp (vulnerable PHP 8.3.35 + WooCommerce) -> db
+#                                                       |  watched by falco (RCE confirmation)
+#   capture/falco/php logs -> vector -> T-Pot's Elasticsearch (127.0.0.1:64298) -> live dashboard + Kibana
+#
+# `isolated` has no route to the internet: whatever an attacker runs inside realphp cannot call home.
+
+services:
+  capture:
+    build: ./capture
+    container_name: capture
+    ports: ["80:8080", "443:8443"]
+    environment:
+      UPSTREAM: realphp:80
+      TLS_CERT: ${TLS_CERT:-/certs/fullchain.pem}
+      TLS_KEY: ${TLS_KEY:-/certs/privkey.pem}
+      HONEYTOKEN_MARKER: HT7f3a
+    volumes:
+      - hpdata:/data
+      - ${CERT_DIR:-./certs}:/certs:ro
+    networks: [public, isolated]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on: [realphp]
+    restart: unless-stopped
+
+  realphp:
+    build: ./shop
+    container_name: realphp          # the Falco rules match on this name
+    environment:
+      DB_HOST: db
+      DB_NAME: shop
+      DB_USER: shop
+      DB_PASS: ${DB_PASS:-change-me-shop-db}
+      SHOP_URL: ${SHOP_URL:-http://localhost}
+      START_DELAY: "45"                # let Falco finish initialising first (see shop/entrypoint.sh)
+    networks: [isolated]
+    depends_on: [db, falco]
+    restart: unless-stopped
+
+  db:
+    image: mariadb:11
+    container_name: shopdb
+    environment:
+      MARIADB_DATABASE: shop
+      MARIADB_USER: shop
+      MARIADB_PASSWORD: ${DB_PASS:-change-me-shop-db}
+      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+    volumes: [dbdata:/var/lib/mysql]
+    networks: [isolated]
+    restart: unless-stopped
+
+  decoy:                              # honeytoken tripwire, see capture/decoy.py
+    build: ./capture
+    container_name: decoy
+    command: ["python", "-I", "decoy.py"]
+    volumes: [hpdata:/data]
+    networks:
+      isolated:
+        aliases: [db-backup.internal]
+    read_only: true
+    cap_drop: [ALL]
+    restart: unless-stopped
+
+  falco:
+    image: falcosecurity/falco:latest
+    container_name: falco
+    privileged: true
+    pid: host
+    command:
+      - /usr/bin/falco
+      - -o
+      - engine.kind=modern_ebpf
+      - -o
+      - json_output=true
+      - -o
+      - stdout_output.enabled=false
+      - -o
+      - file_output.enabled=true
+      - -o
+      - file_output.keep_alive=true
+      - -o
+      - file_output.filename=/var/log/falco/events.json
+      - -o
+      - rules_files[0]=/etc/falco/rules.d/php2shell_rules.yaml
+    volumes:
+      - /var/run/docker.sock:/host/var/run/docker.sock
+      - /proc:/host/proc:ro
+      - /etc:/host/etc:ro
+      - ./falco/php2shell_rules.yaml:/etc/falco/rules.d/php2shell_rules.yaml:ro
+      - falcodata:/var/log/falco
+    restart: unless-stopped
+
+  vector:
+    image: timberio/vector:0.43.1-debian
+    container_name: vector
+    command: ["--config", "/etc/vector/vector.yaml", "--config", "/etc/vector/alerts/*.yaml"]
+    network_mode: host                # reaches T-Pot's Elasticsearch on 127.0.0.1:64298
+    environment:
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      ES_ENDPOINT: ${ES_ENDPOINT:-http://127.0.0.1:64298}
+    volumes:
+      - ./vector/vector.yaml:/etc/vector/vector.yaml:ro
+      - ./vector/alerts:/etc/vector/alerts:ro
+      - hpdata:/data:ro
+      - falcodata:/falco:ro
+      - vectordata:/var/lib/vector
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
+  live:
+    build: ./live
+    container_name: live
+    network_mode: host                # serves http://127.0.0.1:64300 (use an SSH tunnel)
+    environment:
+      ES_URL: http://127.0.0.1:64298
+      LIVE_PORT: "64300"
+    read_only: true
+    restart: unless-stopped
+
+networks:
+  public: {}
+  isolated:
+    internal: true
+
+volumes:
+  hpdata: {}
+  dbdata: {}
+  falcodata: {}
+  vectordata: {}
