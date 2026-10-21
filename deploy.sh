@@ -39,7 +39,10 @@ die() { echo -e "\033[1;31mERROR: $*\033[0m" >&2; exit 1; }
 if [ "$RESUME" = 1 ]; then
     [ -f "$STATE" ] && source "$STATE"
 else
-    [ -n "$WEB_USER" ] && [ -n "$WEB_PASS" ] || die "--web-user and --web-pass are required (they protect T-Pot's web UI)"
+    [ -n "$WEB_USER" ] && [ -n "$WEB_PASS" ] || die "--web-user and --web-pass are required (they protect T-Pot's web UI and the live dashboard)"
+    [[ "$WEB_USER" =~ ^[A-Za-z0-9._-]+$ ]] || die "--web-user may only contain letters, digits, dot, underscore and dash"
+    [ "${#WEB_PASS}" -ge 8 ] || die "--web-pass must be at least 8 characters"
+    case "$WEB_PASS" in *"'"*|*'$'*) die "--web-pass must not contain a single quote or a dollar sign (it is written to .env)";; esac
     umask 077
     printf 'WEB_USER=%q\nWEB_PASS=%q\nDOMAIN=%q\nEMAIL=%q\n' "$WEB_USER" "$WEB_PASS" "$DOMAIN" "$EMAIL" > "$STATE"
 fi
@@ -119,6 +122,10 @@ CERT_DIR=./certs
 SLACK_WEBHOOK_URL=
 EOF
 fi
+# the live dashboard reuses T-Pot's web login (same user and password for every dashboard); it refuses to start without them
+sed -i '/^LIVE_USER=/d; /^LIVE_PASSWORD=/d' "$PROJ/.env"
+chmod 600 "$PROJ/.env"
+{ echo "LIVE_USER=$WEB_USER"; echo "LIVE_PASSWORD='$WEB_PASS'"; } >> "$PROJ/.env"
 mkdir -p "$PROJ/certs"
 
 log "building and starting the add-on (first build downloads WordPress and WooCommerce; allow ~10 minutes)"
@@ -153,6 +160,7 @@ SSH                 ssh -p 64295 $USER@$IP
 T-Pot web UI        https://$IP:64297   (user: ${WEB_USER:-your web user})
                     -> Kibana -> Dashboards -> "php-Honeypot"
 Live dashboard      ssh -p 64295 -L 8000:127.0.0.1:64300 $USER@$IP   then open http://localhost:8000
+                    (login: the same user and password as the T-Pot web UI)
 Raw captures        docker volume 'hpdata' (captures/<sha256>.bin, logs/events.jsonl)
 Reset the shop      scripts/reset-shop.sh [--db]
 

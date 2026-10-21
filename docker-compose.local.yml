@@ -12,7 +12,7 @@ services:
   live:
     network_mode: !reset null
     extra_hosts: ["host.docker.internal:host-gateway"]
-    ports: ["64300:64300"]
+    ports: ["127.0.0.1:64300:64300"]
     environment:
       ES_URL: http://host.docker.internal:64298
       LIVE_BIND: 0.0.0.0

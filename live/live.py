@@ -3,14 +3,22 @@
 Live dashboard backend (stdlib only). Serves index.html and /api/state, which runs aggregations
 against the php2shell-* indices in T-Pot's Elasticsearch and returns everything the page needs.
 Bound to 127.0.0.1 only: reach it through an SSH tunnel.
+
+Everything (page and API) requires HTTP basic auth. LIVE_USER and LIVE_PASSWORD are mandatory: the server refuses
+to start without them, so there is no unauthenticated mode. Basic auth is not encrypted on its own: keep using the
+SSH tunnel, or put TLS in front, before exposing this beyond loopback.
 """
-import json, os, urllib.request
+import base64, hmac, json, os, sys, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 ES = os.environ.get("ES_URL", "http://127.0.0.1:64298")
 PORT = int(os.environ.get("LIVE_PORT", "64300"))
+USER = os.environ.get("LIVE_USER", "")
+PASSWORD = os.environ.get("LIVE_PASSWORD", "")
+MAX_FAILS, FAIL_WINDOW = 8, 300          # lock out after 8 failed logins within 5 minutes (global: behind a tunnel every client is 127.0.0.1)
+_fails, _fails_lock = [], threading.Lock()
 HERE = Path(__file__).parent
 INDEX = "php2shell-*"
 WINDOWS = {"1h": ("now-1h", "1m"), "24h": ("now-24h", "30m"), "7d": ("now-7d", "6h"), "30d": ("now-30d", "1d")}
@@ -112,7 +120,43 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def authorised(self):
+        """True if the request carries valid credentials; otherwise sends 401/429 and returns False."""
+        now = time.time()
+        with _fails_lock:
+            _fails[:] = [t for t in _fails if now - t < FAIL_WINDOW]
+            locked = len(_fails) >= MAX_FAILS
+        if locked:
+            self.send_response(429)
+            self.send_header("Retry-After", str(FAIL_WINDOW))
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"too many failed logins, try again later")
+            return False
+        header = self.headers.get("Authorization", "")
+        ok = False
+        if header.startswith("Basic "):
+            try:
+                user, _, pw = base64.b64decode(header[6:]).decode("utf-8").partition(":")
+                # compare both fields in constant time and always evaluate both
+                ok = hmac.compare_digest(user.encode(), USER.encode()) & hmac.compare_digest(pw.encode(), PASSWORD.encode())
+            except Exception:
+                ok = False
+        if not ok:
+            if header:                                   # a wrong attempt, not just the browser's first anonymous request
+                with _fails_lock:
+                    _fails.append(now)
+                time.sleep(1)                            # slow guessing down
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="php-Honeypot", charset="UTF-8"')
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"authentication required")
+        return ok
+
     def do_GET(self):
+        if not self.authorised():
+            return
         u = urlparse(self.path)
         if u.path == "/api/state":
             try:
@@ -127,5 +171,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"live dashboard on 127.0.0.1:{PORT} (ES {ES})", flush=True)
-    ThreadingHTTPServer((os.environ.get("LIVE_BIND", "127.0.0.1"), PORT), Handler).serve_forever()
+    if not USER or len(PASSWORD) < 8:
+        sys.exit("refusing to start: set LIVE_USER and a LIVE_PASSWORD of at least 8 characters (there is no unauthenticated mode)")
+    bind = os.environ.get("LIVE_BIND", "127.0.0.1")
+    print(f"live dashboard on {bind}:{PORT} (ES {ES}), basic auth enabled for user '{USER}'", flush=True)
+    ThreadingHTTPServer((bind, PORT), Handler).serve_forever()

@@ -29,7 +29,7 @@ Provider firewall: open 80/443 (plus any other T-Pot honeypot ports you want) to
 | Thing | Where |
 |---|---|
 | Fake shop "Trailhaven" (WooCommerce, bait files, fake customers) | `http://<vps>/` |
-| **Live dashboard**: map, feed, funnel, ~40 metrics, confirmed-RCE table with suspected source | `ssh -p 64295 -L 8000:127.0.0.1:64300 user@vps` then http://localhost:8000 |
+| **Live dashboard**: map, feed, funnel, ~40 metrics, confirmed-RCE table with suspected source | `ssh -p 64295 -L 8000:127.0.0.1:64300 user@vps` then http://localhost:8000, login = the `--web-user`/`--web-pass` you gave `deploy.sh` |
 | **Kibana dashboard** "php-Honeypot" inside T-Pot | T-Pot web UI `https://<vps>:64297` -> Kibana -> Dashboards |
 | T-Pot's own map, Suricata, CyberChef, other honeypots | same T-Pot web UI |
 | Raw request bytes of everything | docker volume `hpdata`: `captures/<sha256>.bin`, `logs/events.jsonl` |
@@ -112,3 +112,14 @@ ES_URL=http://127.0.0.1:64298 scripts/setup.sh
 docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 # shop: http://localhost:8081   live dashboard: http://localhost:64300
 ```
+
+## Access control (every dashboard is behind a login)
+| Dashboard | Protection |
+|---|---|
+| Kibana, CyberChef, T-Pot UI | T-Pot's nginx on `:64297` (HTTPS, basic auth with `--web-user` / `--web-pass`); Kibana itself listens on loopback only |
+| Live dashboard | HTTP basic auth, same credentials; bound to loopback (use the SSH tunnel). It **refuses to start without a password** (min. 8 characters); 8 failed logins within 5 minutes lock it for 5 minutes |
+| Elasticsearch | loopback only (`127.0.0.1:64298`), T-Pot's own binding |
+
+Basic auth is not encrypted by itself, which is why the live dashboard stays on loopback behind the SSH tunnel; add TLS in front before exposing it.
+The lockout is global (behind a tunnel every request comes from 127.0.0.1), so an attacker who could reach it could also lock you out for five minutes.
+Only the honeypot itself (`:80`/`:443`) and T-Pot's login-protected nginx are meant to be reachable from the internet.
