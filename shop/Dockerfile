@@ -31,7 +31,7 @@ COPY seed/ /opt/seed/
 COPY entrypoint.sh /entrypoint.sh
 # strip Windows line endings in case the repo was checked out with CRLF
 RUN tr -d '\r' < /entrypoint.sh > /entrypoint.tmp && mv /entrypoint.tmp /entrypoint.sh \
-    && for f in /opt/seed/*.sh; do tr -d '\r' < "$f" > "$f.tmp" && mv "$f.tmp" "$f"; done \
+    && for f in /opt/seed/*; do tr -d '\r' < "$f" > "$f.tmp" && mv "$f.tmp" "$f"; done \
     && chmod +x /entrypoint.sh /opt/seed/*.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

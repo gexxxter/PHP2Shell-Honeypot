@@ -101,6 +101,27 @@ enrichment (confirmed with a synthetic public-IP event); the Kibana import is ac
 container that runs `id; whoami`, writes `drop.php` and opens a connection to 203.0.113.9) produced the expected five events, including the attempted destination
 and the suspected source request.
 
+### 5b. "Some links still 404" and "it is obviously a mock shop"
+
+Two more user reports, same session. A crawler (bash + curl, breadth first, 40 pages and 156 assets) found that every *page* was fine but every **product
+image** was a 404. Cause: uploads live on the container's own filesystem, and `reset-shop.sh` recreates the container while the database (with its attachment
+records) survives. Fix: an idempotent `images.sh` that recreates missing images, the homepage hero and the favicon on every start; verified by resetting the
+container and counting 12/12 working product images afterwards.
+
+Making it believable took a rebuilt seed (`shop/seed/`): a catalogue in `products.tsv` (SKUs, weights, sale prices, long descriptions); per-product illustrations
+drawn with PHP GD (tent, pack, stove, pot, sleeping bag, mat, boot, socks, headlamp, poles) rendered at 2x and downsampled; 2-5 reviews per product with star
+ratings; a homepage with hero banner, category tiles and sale/new-arrival rows; About, Contact, Shipping and returns, Imprint, Privacy and Terms pages;
+a primary menu, footer menus and four footer columns; a shop sidebar (categories, price filter, top rated); a store notice bar; a green brand colour instead
+of Storefront's purple; category tiles using real product images instead of WooCommerce's grey placeholder; the default "Hello world!" post and "Sample Page"
+removed. Everything is invented; the company, person, address and phone number are fictional (the email domain is `.example`, which never resolves).
+
+Process lessons: (1) a change copied into a *running* container is lost on the next reset, so rebuild the image before declaring it done; (2) after changing the
+shop, rerun both safety checks (normal activity = 0 RCE alerts, simulated attack = 5), because more PHP means more chances to look like an attacker. Both held:
+22 realistic requests (incl. cart, checkout, REST, AJAX, search, login, registration, anonymous review post) produced no alerts.
+
+What still makes it a mock, honestly: the product images are flat illustrations rather than photographs, the theme is stock Storefront with colour changes, there
+are no real customers' orders, and a human who looks closely will notice. Automated scanners, which are the intended audience, only fingerprint the platform.
+
 ## 6. What this does not prove (be honest in the post)
 
 - The real exploit was never run. Its trigger was not public, so nothing shows the *vulnerability* being exploited; only that code execution, once achieved, is detected.

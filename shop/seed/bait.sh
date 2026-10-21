@@ -57,6 +57,9 @@ cat > wp-content/mu-plugins/quiet-shop.php <<'PHP'
 add_filter('pre_wp_mail', '__return_true');
 add_filter('pre_http_request', function () { return new WP_Error('http_disabled', 'HTTP requests are disabled'); });
 add_filter('action_scheduler_allow_async_request_runner', '__return_false');
+add_action('wp_head', function () {
+    echo '<style>body.home .entry-title{display:none}.woocommerce-store-notice{background:#2f6f4f!important}.woocommerce-store-notice a{color:#fff!important}</style>';
+});
 PHP
 rm -f wp-content/mu-plugins/no-mail.php
 
@@ -75,3 +78,6 @@ RewriteRule . /index.php [L]
 </IfModule>
 # END WordPress
 HT
+
+# product images / hero / favicon live on the container filesystem: recreate them if a reset removed them
+/opt/seed/images.sh
