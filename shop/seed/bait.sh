@@ -59,3 +59,19 @@ add_filter('pre_http_request', function () { return new WP_Error('http_disabled'
 add_filter('action_scheduler_allow_async_request_runner', '__return_false');
 PHP
 rm -f wp-content/mu-plugins/no-mail.php
+
+# WordPress rewrite rules. Written on every start (WP-CLI cannot detect mod_rewrite, and the Apache image must
+# have AllowOverride All, see Dockerfile). Without this every pretty URL (/shop/, /cart/, /product/...) is a 404.
+cat > .htaccess <<'HT'
+# BEGIN WordPress
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+RewriteBase /
+RewriteRule ^index\.php$ - [L]
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule . /index.php [L]
+</IfModule>
+# END WordPress
+HT

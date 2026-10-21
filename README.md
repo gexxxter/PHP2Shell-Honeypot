@@ -87,7 +87,7 @@ Reset the shop after any confirmed RCE (and on a schedule, e.g. daily from cron)
 
 ## Verified locally (Docker Desktop, Windows) and what that does and does not prove
 Run with T-Pot's own Elasticsearch/Kibana 9.3.5 (its Windows compose file) and `docker-compose.local.yml`:
-- All images build; the shop seeds itself (WordPress 7.1.3 + WooCommerce) and serves as PHP/8.3.35 through the capture proxy.
+- All images build; the shop seeds itself (WordPress + WooCommerce: 12 products with images, categories, shop front page) and every shop page (shop, product, category, cart, checkout, account, search, REST, AJAX) answers correctly as PHP/8.3.35 through the capture proxy.
 - Capture -> Vector -> T-Pot Elasticsearch works, including GeoIP, ASN and user-agent enrichment.
 - The Kibana dashboard imports (17 objects) and renders with live data; the live dashboard renders and shows confirmed RCE with suspected sources.
 - Falco rules fire on a simulated attack (a test script planted in the shop that spawns a shell, writes a `.php` file and opens a connection)

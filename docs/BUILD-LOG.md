@@ -86,6 +86,14 @@ Then a full local run on Docker Desktop, using T-Pot's own Windows compose file 
 | Falco after restart | a container that started before Falco finished initialising is not attributed; attacks went unseen | shop waits 45 s and depends on Falco; documented "restart the shop after Falco" |
 | Browser check | Kibana blank on its direct port: T-Pot serves it behind nginx under `/kibana/` | expected; used a prefix-stripping proxy for the check |
 | Browser check | map tiles showed "API key required" (basemap provider now needs a key) | switched to OpenStreetMap tiles with a dark CSS filter |
+| User reported "the fake shop does not work" | **every shop page was a 404** (`/shop/`, `/cart/`, `/checkout/`, `/product/...`). The Apache image ships `AllowOverride None`, so WordPress's `.htaccess` rewrites were ignored; WP-CLI also cannot detect `mod_rewrite`, so no `.htaccess` was ever written | `AllowOverride All` in the image; `.htaccess` written on every start |
+| Same report | the front page was the default "Hello world!" blog post; products had no images and no categories; WooCommerce's Shop/Cart pages were unreliable | seed script now creates the WooCommerce pages, assigns categories, generates a product image per item, makes the Shop the front page and deletes the default post/page |
+
+**A correction about the first local run.** The earlier statement that the shop "serves as PHP/8.3.35 through the proxy, WooCommerce included" rested on
+`GET /` returning 200, and the first "normal browsing produces zero RCE events" test requested pages that were in fact 404s. Both claims were weaker than
+they sounded. After the fix the false-positive test was redone against real shop behaviour, checking each status code: product, category, cart, checkout,
+WooCommerce AJAX fragments, the Store REST API, search, account, a failed login, a registration attempt and `wp-login.php`. All returned the expected codes and
+produced **zero** RCE events; the simulated attack still produced all five. The lesson for the post: verify the thing a visitor sees, not just that the server answers.
 
 **Results of the local run:** all four images build; the shop seeds and serves as PHP/8.3.35 through the proxy; events flow end to end with GeoIP/ASN/user-agent
 enrichment (confirmed with a synthetic public-IP event); the Kibana import is accepted (17 objects) and renders with data; the live dashboard renders;

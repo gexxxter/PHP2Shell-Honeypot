@@ -5,11 +5,16 @@ FROM php:8.3.35-apache
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libzip-dev libpng-dev libjpeg-dev libfreetype6-dev libicu-dev \
-        mariadb-client curl unzip less ca-certificates \
+        mariadb-client curl unzip less ca-certificates fonts-dejavu-core \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install -j2 mysqli gd zip intl exif opcache bcmath \
     && a2enmod rewrite \
     && rm -rf /var/lib/apt/lists/*
+
+# The base image ships with AllowOverride None, which silently disables WordPress's .htaccess rewrites:
+# every pretty URL (/shop/, /cart/, /product/...) would then be a 404.
+RUN printf '<Directory /var/www/html>\n    AllowOverride All\n</Directory>\n' > /etc/apache2/conf-available/wp-override.conf \
+    && a2enconf wp-override
 
 RUN curl -fsSL -o /usr/local/bin/wp https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
     && chmod +x /usr/local/bin/wp
