@@ -38,15 +38,28 @@ RULES = [(t, re.compile(p, re.I)) for t, p in [
     ("webshell-drop", rb"<\?php|<\?=|filename=\"?[^\"\r\n]*\.(php|phtml|phar)"),
     ("path-probe",    rb"(phpinfo|wp-login|xmlrpc|vendor/phpunit|/cgi-bin/|shell\.php|eval-stdin|wp-config)"),
     ("bait-hit",      rb"^[A-Z]+ /(\.env|backup\.sql|\.git|admin-old|config\.php\.bak|db_backup)"),
+    ("session-upload-progress", rb"PHP_SESSION_UPLOAD_PROGRESS"),   # the field that switches on PHP's session upload-progress tracking (reported upload route)
 ]]
+SCAN_BYTES = 524_288    # how much of a body the pattern rules read: bounds the CPU per request (the proxy is single-threaded); size tags still see the whole body
 HT_RE = re.compile(re.escape(HONEYTOKEN).encode(), re.I)
+
+
+def has_huge_name(buf: bytes, limit: int = 4096) -> bool:
+    """True if any `name=value` pair in an urlencoded string has a NAME longer than `limit` bytes. Split-based, not regex,
+    so a multi-MB body costs milliseconds instead of blocking the proxy."""
+    for part in buf.split(b"&"):
+        if len(part) > limit and len(part.split(b"=", 1)[0]) > limit:
+            return True
+    return False
+
 URL_RE = re.compile(rb"https?://[^\s\"'<>\\|;&)]{4,200}", re.I)
 IP_RE = re.compile(rb"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 # tags that mean "more than background scanning"
 EXPLOIT_TAGS = {"cmd-exec", "shell-strings", "php-wrapper", "php-cgi-arg", "webshell-drop",
                 "multipart-no-boundary", "multipart-long-boundary", "multipart-many-parts",
                 "multipart-unterminated", "multipart-nested", "oversized-body",
-                "content-length-mismatch", "te-cl-smuggling-shape", "honeytoken-reuse"}
+                "content-length-mismatch", "te-cl-smuggling-shape", "honeytoken-reuse",
+                "session-upload-progress", "huge-field-name"}
 
 
 def parse_request(raw: bytes):
@@ -101,10 +114,15 @@ def analyze(method, path, headers, dup, body, truncated):
     if "transfer-encoding" in headers and "content-length" in headers:
         tags.append("te-cl-smuggling-shape")
     tags += dup[:5]
-    hay = (method + " " + path).encode("latin-1", "replace") + b"\r\n" + body[:2_000_000]
+    hay = (method + " " + path).encode("latin-1", "replace") + b"\r\n" + body[:SCAN_BYTES]
     tags += [t for t, rx in RULES if rx.search(hay)]
     if HT_RE.search(hay):
         tags.append("honeytoken-reuse")
+    # a single form field NAME of several KB, in an ordinary urlencoded body or query string: the reported out-of-memory route
+    # (legit field names are a few dozen bytes). Looks at the first 4 MB only, to bound the work.
+    form_body = "x-www-form-urlencoded" in ct.lower()       # only bodies PHP parses as fields; a big binary upload is not a field name
+    if (form_body and has_huge_name(body[:4_000_000])) or has_huge_name(path.partition("?")[2].encode("latin-1", "replace")[:100_000]):
+        tags.append("huge-field-name")
     # credential attempts against login forms
     creds = {}
     if method == "POST" and "urlencoded" in ct.lower():
@@ -133,7 +151,7 @@ def shape_hash(method, path, order, headers, info, body_len):
 
 
 def extract_iocs(body: bytes, path: str):
-    hay = body[:2_000_000] + b" " + path.encode("latin-1", "replace")
+    hay = body[:SCAN_BYTES] + b" " + path.encode("latin-1", "replace")
     urls = {u.decode("latin-1", "replace") for u in URL_RE.findall(hay)}
     ips = {i.decode() for i in IP_RE.findall(hay)
            if all(int(x) <= 255 for x in i.split(b"."))}
