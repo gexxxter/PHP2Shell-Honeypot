@@ -140,11 +140,12 @@ def extract_iocs(body: bytes, path: str):
     return sorted(urls)[:10] + sorted(ips)[:10]
 
 
-def force_close(raw: bytes, src_ip: str) -> bytes:
+def force_close(raw: bytes, src_ip: str, is_tls: bool) -> bytes:
     """Forwarded copy only: close after response (so we can relay until EOF) and pass the real client IP."""
     head, sep, body = raw.partition(b"\r\n\r\n")
-    head = re.sub(rb"\r\n(connection|x-forwarded-for):[^\r\n]*", b"", head, flags=re.I)
-    head += b"\r\nConnection: close\r\nX-Forwarded-For: " + src_ip.encode()
+    head = re.sub(rb"\r\n(connection|x-forwarded-for|x-forwarded-proto):[^\r\n]*", b"", head, flags=re.I)
+    head += (b"\r\nConnection: close\r\nX-Forwarded-For: " + src_ip.encode()
+             + b"\r\nX-Forwarded-Proto: " + (b"https" if is_tls else b"http"))
     return head + sep + body
 
 
@@ -171,10 +172,10 @@ async def read_request(reader, writer):
     return head + b"\r\n\r\n" + rest, truncated
 
 
-async def forward(raw: bytes, src_ip: str) -> bytes:
+async def forward(raw: bytes, src_ip: str, is_tls: bool = False) -> bytes:
     try:
         r, w = await asyncio.wait_for(asyncio.open_connection(UP_HOST, UP_PORT), 5)
-        w.write(force_close(raw, src_ip))
+        w.write(force_close(raw, src_ip, is_tls))
         await w.drain()
         out = b""
         async with asyncio.timeout(UP_TIMEOUT):
@@ -204,7 +205,7 @@ def make_handler(is_tls: bool):
             if not cap.exists():
                 cap.write_bytes(raw)
             t1 = time.monotonic()
-            resp = await forward(raw, peer[0])
+            resp = await forward(raw, peer[0], is_tls)
             up_ms = int((time.monotonic() - t1) * 1000)
             status = int(resp[9:12]) if resp[:5] == b"HTTP/" and resp[9:12].isdigit() else 0
             event = {

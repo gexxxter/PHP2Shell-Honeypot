@@ -16,6 +16,8 @@ define('DISABLE_WP_CRON', true);
 define('WP_AUTO_UPDATE_CORE', false);
 define('AUTOMATIC_UPDATER_DISABLED', true);
 define('WP_HTTP_BLOCK_EXTERNAL', true);
+// TLS is terminated by the capture proxy; without this WordPress redirects https requests to https forever
+if (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') { $_SERVER['HTTPS'] = 'on'; }
 PHP
 fi
 
