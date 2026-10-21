@@ -12,11 +12,19 @@ fi
 [ -n "$KB" ] || { echo "Kibana not reachable on 127.0.0.1:64296 yet; set KIBANA_URL and re-run scripts/kibana-import.sh"; exit 1; }
 
 OUT="$(mktemp)"
+# hide the configured IPs (your own machines) in every visualization, like the live dashboard does
+IGN_LIST="${LIVE_IGNORE_IPS:-$(grep -s "^LIVE_IGNORE_IPS=" "$(dirname "$0")/../.env" | cut -d= -f2- | tr -d "'\"")}"
+IGN=""
+if [ -n "$IGN_LIST" ]; then
+    IGN="not src_ip:($(echo "$IGN_LIST" | tr -d " " | sed "s/,/\" or \"/g; s/^/\"/; s/$/\"/"))"
+fi
 REF='[{"name":"kibanaSavedObjectMeta.searchSourceJSON.index","type":"index-pattern","id":"php2shell"}]'
 
 # vis <id> <title> <type> <params-json> <aggs-json> <kql-query>
 vis() {
-    jq -nc --arg id "$1" --arg title "$2" --arg type "$3" --argjson params "$4" --argjson aggs "$5" --arg q "$6" --argjson ref "$REF" '
+    local q="$6"
+    if [ -n "$IGN" ]; then if [ -n "$q" ]; then q="($q) and $IGN"; else q="$IGN"; fi; fi
+    jq -nc --arg id "$1" --arg title "$2" --arg type "$3" --argjson params "$4" --argjson aggs "$5" --arg q "$q" --argjson ref "$REF" '
     {id:$id, type:"visualization",
      attributes:{title:$title, description:"", uiStateJSON:"{}",
        visState:({title:$title, type:$type, aggs:$aggs, params:$params}|tostring),

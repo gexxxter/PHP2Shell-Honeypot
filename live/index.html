@@ -63,6 +63,7 @@ a.lk{color:#6ea8ff;cursor:pointer;text-decoration:none}a.lk:hover{text-decoratio
   <h1>php-Honeypot live</h1>
   <div class="ctl">
     <span id="health"></span>
+    <label id="hidewrap" style="display:none" title="IPs set in LIVE_IGNORE_IPS on the server (your own, test machines)"><input type="checkbox" id="hide" checked> <span id="hidetxt"></span></label>
     <label>Window <select id="win"><option>1h</option><option selected>24h</option><option>7d</option><option>30d</option></select></label>
     <span id="upd"></span>
   </div>
@@ -358,9 +359,23 @@ function render(s){
   $('upd').textContent = 'updated ' + new Date().toLocaleTimeString();
 }
 
+// "Hide my test IPs": the server filters the configured IPs out of every number, chart and list. On by default; the choice is remembered.
+let hideMine = true;
+try{ if(localStorage.getItem('hideMine') === '0') hideMine = false; }catch(e){}
+$('hide').checked = hideMine;
+$('hide').addEventListener('change', () => { hideMine = $('hide').checked; try{ localStorage.setItem('hideMine', hideMine ? '1' : '0'); }catch(e){} tick(); });
+function renderIgnore(ig){
+  if(!ig || !ig.ips || !ig.ips.length){ $('hidewrap').style.display = 'none'; return; }
+  $('hidewrap').style.display = '';
+  $('hidewrap').title = 'Ignored: ' + ig.ips.join(', ');
+  $('hidetxt').textContent = hideMine ? `Hide my test IPs (${fmt(ig.hidden_requests)} requests hidden)`
+                                      : `Hide my test IPs (off: ${fmt(ig.hidden_requests)} requests from ${ig.ips.length} IP${ig.ips.length>1?'s':''} included)`;
+}
+
 async function tick(){
   try{
-    const r = await fetch('/api/state?w='+$('win').value); const s = await r.json();
+    const r = await fetch('/api/state?w=' + $('win').value + '&hide=' + (hideMine ? 1 : 0)); const s = await r.json();
+    renderIgnore(s.ignore);
     if(s.error){ $('err').textContent = 'Backend error: ' + s.error; return; }
     $('err').textContent = ''; render(s);
   }catch(e){ $('err').textContent = 'Fetch failed: ' + e.message; }
