@@ -24,8 +24,6 @@ CAPTURE_DIR = Path(os.environ.get("CAPTURE_DIR", "/data/captures"))   # the capt
 VIEW_BYTES = 1_000_000          # how much of a request the inspector renders as text
 HEX_BYTES = 16 * 1024           # how much it renders as a hex dump (the full file is always available as a download)
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
-# IPs or CIDR ranges (e.g. your own, or your test machines) hidden from every number and list unless the toggle is switched off
-IGNORE = [x.strip() for x in os.environ.get("LIVE_IGNORE_IPS", "").split(",") if re.match(r"^[0-9a-fA-F:.]+(/[0-9]{1,3})?$", x.strip())]
 INDEX = "php2shell-*"
 WINDOWS = {"1h": ("now-1h", "1m"), "24h": ("now-24h", "30m"), "7d": ("now-7d", "6h"), "30d": ("now-30d", "1d")}
 
@@ -97,16 +95,15 @@ def raw_view(sha: str, limit: int = VIEW_BYTES):
             "body": show(body), "hex": hexdump(data[:HEX_BYTES]), "hex_truncated": size > HEX_BYTES}
 
 
-def state(window, hide=True):
+def state(window):
     gte, interval = WINDOWS.get(window, WINDOWS["24h"])
     rng = {"range": {"@timestamp": {"gte": gte}}}
     exploit = {"term": {"exploit_like": True}}
-    mn = [{"terms": {"src_ip": IGNORE}}] if (hide and IGNORE) else []   # events from ignored IPs (RCE/crash events have no src_ip and are never hidden)
     main = es(f"/{INDEX}/_search?ignore_unavailable=true", {
         "size": 300, "sort": [{"@timestamp": "desc"}], "track_total_hits": True,
         "_source": ["@timestamp", "kind", "src_ip", "geo", "asn.organization_name", "path", "method", "exploit_like",
                     "tags", "rce_type", "detail", "signal", "shape_hash", "ua", "sha256", "request_line", "body_len"],
-        "query": {"bool": {"filter": [rng], "must_not": mn}},
+        "query": {"bool": {"filter": [rng]}},
         "aggs": {
             "kinds": terms("kind", 10, last={"max": {"field": "@timestamp"}}),
             "ips": {"cardinality": {"field": "src_ip"}},
@@ -144,7 +141,7 @@ def state(window, hide=True):
         }})
     # all-time first-seen per payload shape, to count genuinely new shapes in the window
     firsts = es(f"/{INDEX}/_search?ignore_unavailable=true", {
-        "size": 0, "query": {"bool": {"filter": [exploit], "must_not": mn}},
+        "size": 0, "query": {"term": {"exploit_like": True}},
         "aggs": {"s": {"terms": {"field": "shape_hash", "size": 1000}, "aggs": {"first": {"min": {"field": "@timestamp"}}}}}})
     rce = es(f"/{INDEX}/_search?ignore_unavailable=true", {
         "size": 20, "sort": [{"@timestamp": "desc"}],
@@ -153,7 +150,7 @@ def state(window, hide=True):
     interesting = es(f"/{INDEX}/_search?ignore_unavailable=true", {         # newest exploit-like requests, for the inspector list
         "size": 30, "sort": [{"@timestamp": "desc"}],
         "_source": ["@timestamp", "src_ip", "geo.country_iso_code", "request_line", "method", "path", "tags", "body_len", "sha256", "shape_hash"],
-        "query": {"bool": {"filter": [rng, {"term": {"kind": "request"}}, exploit], "must_not": mn}}})
+        "query": {"bool": {"filter": [rng, {"term": {"kind": "request"}}, exploit]}}})
     # suspected sources: requests in the 15 s before each confirmation (shared container, so it is a time correlation)
     suspects = []
     if rce_hits:
@@ -163,16 +160,10 @@ def state(window, hide=True):
             nd += json.dumps({"size": 4, "sort": [{"exploit_like": "desc"}, {"@timestamp": "desc"}],
                               "_source": ["@timestamp", "src_ip", "geo", "request_line", "shape_hash", "tags", "sha256"],
                               "query": {"bool": {"filter": [{"term": {"kind": "request"}}, {"range": {"@timestamp": {
-                                  "gte": h["@timestamp"] + "||-15s", "lte": h["@timestamp"]}}}], "must_not": mn}}}) + "\n"
+                                  "gte": h["@timestamp"] + "||-15s", "lte": h["@timestamp"]}}}]}}}) + "\n"
         resp = es("/_msearch", nd, ndjson=True)
         suspects = [[x["_source"] for x in r.get("hits", {}).get("hits", [])] for r in resp.get("responses", [])]
-    hidden = 0
-    if IGNORE:                       # how many requests in this window come from the ignored IPs (shown next to the toggle)
-        hidden = es(f"/{INDEX}/_search?ignore_unavailable=true", {
-            "size": 0, "track_total_hits": True,
-            "query": {"bool": {"filter": [rng, {"term": {"kind": "request"}}, {"terms": {"src_ip": IGNORE}}]}}})["hits"]["total"]["value"]
     return {"window": window, "now": None, "total": main["hits"]["total"]["value"],
-            "ignore": {"ips": IGNORE, "active": bool(hide and IGNORE), "hidden_requests": hidden},
             "recent": [h["_source"] for h in main["hits"]["hits"]], "aggs": main["aggregations"],
             "shape_first": firsts.get("aggregations", {}).get("s", {}).get("buckets", []),
             "rce": rce_hits, "suspects": suspects,
@@ -230,10 +221,8 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path == "/api/state":
             try:
-                qs = parse_qs(u.query)
-                w = qs.get("w", ["24h"])[0]
-                hide = qs.get("hide", ["1"])[0] != "0"       # default: hide the configured IPs
-                self.send(200, json.dumps(state(w, hide)).encode(), "application/json")
+                w = parse_qs(u.query).get("w", ["24h"])[0]
+                self.send(200, json.dumps(state(w)).encode(), "application/json")
             except Exception as e:
                 self.send(502, json.dumps({"error": str(e)}).encode(), "application/json")
         elif u.path == "/api/raw":
