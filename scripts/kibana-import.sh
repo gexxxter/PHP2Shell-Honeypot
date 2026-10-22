@@ -36,7 +36,7 @@ DATEH='{"id":"2","enabled":true,"type":"date_histogram","params":{"field":"@time
 
 # data view. `raw_request` is a runtime field that reads the readable request text from _source: the stored request_text field
 # is too long to be indexed (ignore_above), so Kibana could not show it in a table column otherwise.
-RUNTIME='{"raw_request":{"type":"keyword","script":{"source":"if (params._source.containsKey(\"request_text\")) { String s = params._source.request_text; emit(s.length() > 30000 ? s.substring(0, 30000) : s); }"}}}'
+RUNTIME='{"raw_request":{"type":"keyword","script":{"source":"if (params._source.containsKey(\"request_text\")) { String s = params._source.request_text; emit(s.length() > 30000 ? s.substring(0, 30000) : s); }"}},"origin_class":{"type":"keyword","script":{"source":"if (doc.containsKey(\"exploit_like\") && doc[\"exploit_like\"].size() > 0 && doc[\"exploit_like\"].value) { emit(\"exploit-like\"); } else { emit(\"other\"); }"}}}'
 jq -nc --arg rt "$RUNTIME" '{id:"php2shell",type:"index-pattern",attributes:{title:"php2shell-*",timeFieldName:"@timestamp",runtimeFieldMap:$rt},references:[]}' >> "$OUT"
 
 # saved searches (Discover tables) embedded in the dashboard: the requests themselves, newest first.
@@ -52,6 +52,35 @@ search() {
      references:$ref}' >> "$OUT"
 }
 search s-requests     "Exploit-like requests: the raw HTTP request, newest first" 'exploit_like:true and kind:"request"' '["src_ip","geo.country_name","tags","raw_request"]' 12
+# Origin map (Kibana Maps): base map plus every request as a point, exploit-like ones in red (sorted oldest first, so the newest draw on top).
+# Uses the geo.location point the geoip pipeline adds to each event. Hover a point for IP, country, city, tags and the request line.
+MAP_TOOLTIP='["src_ip","geo.country_name","geo.city_name","asn.organization_name","tags","request_line","origin_class"]'
+# One layer: each request is a point, coloured by its exploit_like value (red when true, blue otherwise). Per-layer queries and
+# filters are not honoured by this Maps version, so the distinction is made by data-driven styling instead.
+MAP_LAYER=$(jq -nc --argjson tip "$MAP_TOOLTIP" '
+    {id:"l-requests", label:"Requests (red = exploit-like)", type:"GEOJSON_VECTOR", visible:true, minZoom:0, maxZoom:24, alpha:0.85,
+     sourceDescriptor:{id:"l-requests-src", type:"ES_SEARCH", geoField:"geo.location", scalingType:"LIMIT", limit:5000, filterByMapBounds:true,
+       applyGlobalQuery:true, applyGlobalTime:true, applyForceRefresh:true, tooltipProperties:$tip, sortField:"@timestamp", sortOrder:"asc",
+       topHitsSplitField:"", topHitsSize:1, indexPatternRefName:"l-requests_index_pattern"},
+     style:{type:"VECTOR", isTimeAware:true, properties:{
+       icon:{type:"STATIC",options:{value:"marker"}}, symbolizeAs:{options:{value:"circle"}},
+       fillColor:{type:"DYNAMIC", options:{type:"CATEGORICAL", field:{name:"origin_class", origin:"source"}, useCustomColorPalette:true,
+                  customColorPalette:[{stop:null, color:"#6092C0"}, {stop:"exploit-like", color:"#E7664C"}],   # first entry (stop null) = every other value
+                  fieldMetaOptions:{isEnabled:true, sigma:3}}},
+       lineColor:{type:"STATIC",options:{color:"#FFFFFF"}}, lineWidth:{type:"STATIC",options:{size:1}},
+       iconSize:{type:"STATIC",options:{size:8}}}}}')
+BASE='{"id":"basemap","label":null,"type":"EMS_VECTOR_TILE","visible":true,"minZoom":0,"maxZoom":24,"alpha":1,"locale":"autoselect","style":{"type":"EMS_VECTOR_TILE"},"sourceDescriptor":{"type":"EMS_TMS","isAutoSelect":true,"lightModeDefault":"road_map_desaturated"}}'
+LAYERS=$(jq -nc --argjson b "$BASE" --argjson l "$MAP_LAYER" '[$b,$l]')
+jq -nc --arg layers "$LAYERS" --argjson ref "$REF" '
+  {id:"m-origin", type:"map",
+   attributes:{title:"Where the requests come from (red = exploit-like)", description:"",
+     mapStateJSON:({zoom:1.3, center:{lon:15,lat:25}, timeFilters:{from:"now-24h",to:"now"}, refreshConfig:{isPaused:true,interval:0},
+                    query:{query:"",language:"kuery"}, filters:[], settings:{autoFitToDataBounds:false, initialLocation:"LAST_SAVED_LOCATION",
+                    fixedLocation:{lat:0,lon:0,zoom:2}, browserLocation:{zoom:2}, maxZoom:24, minZoom:0, showScaleControl:true,
+                    showSpatialFilters:true, showTimesliderToggleButton:true}} | tostring),
+     layerListJSON:$layers, uiStateJSON:"{\"isLayerTOCOpen\":true,\"openTOCDetails\":[]}"},
+   references:[{name:"l-requests_index_pattern",type:"index-pattern",id:"php2shell"}]}' >> "$OUT"
+
 search s-all-requests "All requests: the raw HTTP request, newest first"          'kind:"request"'                        '["src_ip","geo.country_name","tags","raw_request"]' 8
 
 vis v-req      "Requests"                  metric "$METRIC_PARAMS" "[$COUNT]" 'kind:"request"'
@@ -71,13 +100,13 @@ vis v-rcecmd   "RCE commands"              table "$TABLE_PARAMS" "[$COUNT,$(term
 vis v-iocs     "Extracted IOCs"            table "$TABLE_PARAMS" "[$COUNT,$(terms 2 iocs 15 bucket)]" 'kind:"request"'
 
 # dashboard layout: id w h
-PANELS=(v-req:8:6 v-exploit:8:6 v-rce:8:6 v-crash:8:6 v-ht:8:6 s-requests:48:24 v-time:48:12 v-tags:16:14 v-country:16:14 v-ua:16:14
+PANELS=(v-req:8:6 v-exploit:8:6 v-rce:8:6 v-crash:8:6 v-ht:8:6 m-origin:48:26 s-requests:48:24 v-time:48:12 v-tags:16:14 v-country:16:14 v-ua:16:14
         v-ips:24:14 v-asn:24:14 v-shapes:24:14 v-paths:24:14 v-rcecmd:24:14 v-iocs:24:14 s-all-requests:48:22)
 panels="[]"; refs="[]"; x=0; y=0; rowh=0; i=0
 for p in "${PANELS[@]}"; do
     IFS=: read -r id w h <<<"$p"
     if [ $((x + w)) -gt 48 ]; then x=0; y=$((y + rowh)); rowh=0; fi
-    ptype=visualization; [[ "$id" == s-* ]] && ptype=search       # s-* ids are saved searches (raw request tables)
+    ptype=visualization; [[ "$id" == s-* ]] && ptype=search; [[ "$id" == m-* ]] && ptype=map   # s-* = saved searches (request tables), m-* = Maps
     panels=$(jq -c --argjson x $x --argjson y $y --argjson w $w --argjson h $h --arg i "$i" --arg t "$ptype" \
         '. + [{version:"8.0.0",type:$t,gridData:{x:$x,y:$y,w:$w,h:$h,i:$i},panelIndex:$i,embeddableConfig:{},panelRefName:("panel_"+$i)}]' <<<"$panels")
     refs=$(jq -c --arg n "panel_$i" --arg id "$id" --arg t "$ptype" '. + [{name:$n,type:$t,id:$id}]' <<<"$refs")
