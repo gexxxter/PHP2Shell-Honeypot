@@ -52,16 +52,17 @@ search() {
      references:$ref}' >> "$OUT"
 }
 search s-requests     "Exploit-like requests: the raw HTTP request, newest first" 'exploit_like:true and kind:"request"' '["src_ip","geo.country_name","tags","raw_request"]' 12
-# Origin map (Kibana Maps): base map plus every request as a point, exploit-like ones in red (sorted oldest first, so the newest draw on top).
+# Origin map (Kibana Maps): base map plus one point per source IP (its exploit-like request if it sent one), exploit-like in red, others blue.
 # Uses the geo.location point the geoip pipeline adds to each event. Hover a point for IP, country, city, tags and the request line.
 MAP_TOOLTIP='["src_ip","geo.country_name","geo.city_name","asn.organization_name","tags","request_line","origin_class"]'
 # One layer: each request is a point, coloured by its exploit_like value (red when true, blue otherwise). Per-layer queries and
 # filters are not honoured by this Maps version, so the distinction is made by data-driven styling instead.
 MAP_LAYER=$(jq -nc --argjson tip "$MAP_TOOLTIP" '
     {id:"l-requests", label:"Requests (red = exploit-like)", type:"GEOJSON_VECTOR", visible:true, minZoom:0, maxZoom:24, alpha:0.85,
-     sourceDescriptor:{id:"l-requests-src", type:"ES_SEARCH", geoField:"geo.location", scalingType:"LIMIT", limit:5000, filterByMapBounds:true,
-       applyGlobalQuery:true, applyGlobalTime:true, applyForceRefresh:true, tooltipProperties:$tip, sortField:"@timestamp", sortOrder:"asc",
-       topHitsSplitField:"", topHitsSize:1, indexPatternRefName:"l-requests_index_pattern"},
+     sourceDescriptor:{id:"l-requests-src", type:"ES_SEARCH", geoField:"geo.location", scalingType:"TOP_HITS", limit:1000, filterByMapBounds:true,
+       applyGlobalQuery:true, applyGlobalTime:true, applyForceRefresh:true, tooltipProperties:$tip,
+       sortField:"exploit_like", sortOrder:"desc", topHitsSplitField:"src_ip", topHitsSize:1,        # one point per source IP; an exploit-like request wins
+       indexPatternRefName:"l-requests_index_pattern"},
      style:{type:"VECTOR", isTimeAware:true, properties:{
        icon:{type:"STATIC",options:{value:"marker"}}, symbolizeAs:{options:{value:"circle"}},
        fillColor:{type:"DYNAMIC", options:{type:"CATEGORICAL", field:{name:"origin_class", origin:"source"}, useCustomColorPalette:true,
