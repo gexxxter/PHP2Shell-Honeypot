@@ -17,11 +17,23 @@ while IFS='|' read -r name price sale cat type color sku weight short long; do
     tid=$($WP post meta get "$id" _thumbnail_id 2>/dev/null || true)
     file=""
     [ -n "$tid" ] && file=$($WP eval "echo (string) get_attached_file((int) '$tid');" 2>/dev/null || true)
-    if [ -z "$file" ] || [ ! -f "$file" ]; then
+    photo="/opt/seed/photos/$sku.jpg"
+    is_photo=""
+    [ -n "$tid" ] && is_photo=$($WP post meta get "$tid" _th_photo 2>/dev/null || true)
+    # a real photo (seed/photos/<SKU>.jpg) wins over the drawn illustration; products without one keep the illustration
+    want_photo=""; [ -f "$photo" ] && [ "$is_photo" != "1" ] && want_photo=1
+    if [ -z "$file" ] || [ ! -f "$file" ] || [ -n "$want_photo" ]; then
         [ -n "$tid" ] && $WP post delete "$tid" --force >/dev/null 2>&1 || true
-        php /opt/seed/make-image.php "$type" "$color" "/tmp/img-$sku.png"
-        $WP media import "/tmp/img-$sku.png" --post_id="$id" --featured_image --title="$name" --alt="$name" --porcelain >/dev/null
-        rm -f "/tmp/img-$sku.png"
+        if [ -f "$photo" ]; then
+            cp "$photo" "/tmp/img-$sku.jpg"
+            new=$($WP media import "/tmp/img-$sku.jpg" --post_id="$id" --featured_image --title="$name" --alt="$name" --porcelain)
+            $WP post meta update "$new" _th_photo 1 >/dev/null
+            rm -f "/tmp/img-$sku.jpg"
+        else
+            php /opt/seed/make-image.php "$type" "$color" "/tmp/img-$sku.png"
+            $WP media import "/tmp/img-$sku.png" --post_id="$id" --featured_image --title="$name" --alt="$name" --porcelain >/dev/null
+            rm -f "/tmp/img-$sku.png"
+        fi
         echo "[shop] image (re)created for $name"
     fi
 done < /opt/seed/products.tsv

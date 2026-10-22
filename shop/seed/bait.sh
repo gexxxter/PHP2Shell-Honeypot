@@ -81,3 +81,6 @@ HT
 
 # product images / hero / favicon live on the container filesystem: recreate them if a reset removed them
 /opt/seed/images.sh
+
+# product specifications, FAQ, size guide and journal posts (idempotent; never overwrites existing pages)
+/opt/seed/polish.sh || echo "[shop] content polish failed (non-fatal)"
