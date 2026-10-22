@@ -68,10 +68,35 @@ transforms:
         "tags": ["php-worker-crash"]
       }
 
+  shop_php_errors:
+    type: remap
+    inputs: [shop_logs]
+    source: |
+      # PHP2Shell's trigger is running out of memory (or time) while a request is still being parsed, so these PHP error-log
+      # lines show which probes actually got that far, even when nothing crashes. Rare on a static shop; a cluster is a lead.
+      msg = string(.message) ?? ""
+      kind = null
+      if match(msg, r'Allowed memory size of \d+ bytes exhausted') {
+        kind = "memory-limit"
+      } else if match(msg, r'Out of memory \(allocated') {
+        kind = "out-of-memory"
+      } else if match(msg, r'Maximum execution time of \d+ seconds? exceeded') {
+        kind = "execution-timeout"
+      }
+      if kind == null { abort }
+      . = {
+        "@timestamp": .timestamp,
+        "kind": "php_oom",
+        "signal": kind,
+        "detail": slice!(msg, 0, 300),
+        "exploit_like": kind != "execution-timeout",
+        "tags": ["php-" + kind]
+      }
+
 sinks:
   elasticsearch:
     type: elasticsearch
-    inputs: [parse_json_events, falco_events, shop_crashes]
+    inputs: [parse_json_events, falco_events, shop_crashes, shop_php_errors]
     endpoints: ["${ES_ENDPOINT:-http://127.0.0.1:64298}"]
     mode: bulk
     pipeline: php2shell-enrich

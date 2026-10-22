@@ -60,7 +60,7 @@ EXPLOIT_TAGS = {"cmd-exec", "shell-strings", "php-wrapper", "php-cgi-arg", "webs
                 "multipart-unterminated", "multipart-nested", "oversized-body",
                 "content-length-mismatch", "te-cl-smuggling-shape", "honeytoken-reuse",
                 "session-upload-progress", "huge-field-name", "multipart-no-length", "multipart-many-headers",
-                "multipart-many-empty-files", "multipart-deep-names"}
+                "multipart-many-empty-files", "multipart-deep-names", "phpsessid-anomaly"}
 
 
 def parse_request(raw: bytes):
@@ -81,6 +81,22 @@ def parse_request(raw: bytes):
         headers[k] = v.decode("latin-1", "replace").strip()
     version = parts[2] if len(parts) > 2 else ""
     return (parts[0] if parts else ""), (parts[1] if len(parts) > 1 else ""), version, reqline, headers, order, dup, body
+
+
+# IPs Amazon's MadPot honeypots saw sending PHP2Shell attempts (17-21 Oct 2026). Informational only: they are shared anonymisation
+# infrastructure, not exclusive to this activity.
+KNOWN_EXPLOIT_IPS = {"103.216.220.92", "31.223.184.166", "37.19.200.5", "134.209.159.64", "103.114.163.188", "95.217.98.37"}
+SESSID_RE = re.compile(rb"^[A-Za-z0-9,-]{1,128}$")      # what PHP itself generates for a session id
+
+
+def response_tags(resp: bytes) -> list:
+    """CVE-2026-109618 can return freed worker memory inside a PHPSESSID response cookie (Sansec). PHP's own ids are plain
+    [A-Za-z0-9,-]; anything else (percent-escapes, binary, very long) in a PHPSESSID Set-Cookie is a leak candidate."""
+    head = resp.split(b"\r\n\r\n", 1)[0][:65536]
+    for m in re.finditer(rb"(?im)^set-cookie:\s*phpsessid=([^;\r\n]*)", head):
+        if not SESSID_RE.match(m.group(1)):
+            return ["phpsessid-anomaly"]
+    return []
 
 
 def multipart_oom_shapes(body: bytes, boundary: bytes) -> list:
@@ -265,6 +281,11 @@ def make_handler(is_tls: bool):
             resp = await forward(raw, peer[0], is_tls)
             up_ms = int((time.monotonic() - t1) * 1000)
             status = int(resp[9:12]) if resp[:5] == b"HTTP/" and resp[9:12].isdigit() else 0
+            tags += response_tags(resp)
+            if method == "POST" and "multipart/" in headers.get("content-type", "").lower():
+                tags.append("multipart-post")      # the shop has no upload endpoint: informational, not exploit-like on its own
+            if peer[0] in KNOWN_EXPLOIT_IPS:
+                tags.append("known-exploit-ip")
             event = {
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + f".{int(time.time()*1000)%1000:03d}Z",
                 "kind": "request", "req_id": uuid.uuid4().hex[:12],
