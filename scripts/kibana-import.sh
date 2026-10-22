@@ -52,35 +52,37 @@ search() {
      references:$ref}' >> "$OUT"
 }
 search s-requests     "Exploit-like requests: the raw HTTP request, newest first" 'exploit_like:true and kind:"request"' '["src_ip","geo.country_name","tags","raw_request"]' 12
-# Origin map (Kibana Maps): base map plus one point per source IP (its exploit-like request if it sent one), exploit-like in red, others blue.
-# Uses the geo.location point the geoip pipeline adds to each event. Hover a point for IP, country, city, tags and the request line.
+# Origin map (Kibana Maps): base map, blue clusters for every request (adapts to any volume), and individual exploit-like requests as
+# red points on top. Uses the geo.location point the geoip pipeline adds to each event. Hover a point for IP, country, city, network,
+# tags and the request line. This Maps version offers three scaling modes (vector tiles, clusters above 10,000 results, a 10,000 limit):
+# the exploit-like layer sorts exploit_like first inside the limit, so ordinary traffic can never push exploit-like points out.
 MAP_TOOLTIP='["src_ip","geo.country_name","geo.city_name","asn.organization_name","tags","request_line","origin_class"]'
-# One layer: each request is a point, coloured by its exploit_like value (red when true, blue otherwise). Per-layer queries and
-# filters are not honoured by this Maps version, so the distinction is made by data-driven styling instead.
-MAP_LAYER=$(jq -nc --argjson tip "$MAP_TOOLTIP" '
-    {id:"l-requests", label:"Requests (red = exploit-like)", type:"GEOJSON_VECTOR", visible:true, minZoom:0, maxZoom:24, alpha:0.85,
-     sourceDescriptor:{id:"l-requests-src", type:"ES_SEARCH", geoField:"geo.location", scalingType:"TOP_HITS", limit:1000, filterByMapBounds:true,
-       applyGlobalQuery:true, applyGlobalTime:true, applyForceRefresh:true, tooltipProperties:$tip,
-       sortField:"exploit_like", sortOrder:"desc", topHitsSplitField:"src_ip", topHitsSize:1,        # one point per source IP; an exploit-like request wins
-       indexPatternRefName:"l-requests_index_pattern"},
-     style:{type:"VECTOR", isTimeAware:true, properties:{
-       icon:{type:"STATIC",options:{value:"marker"}}, symbolizeAs:{options:{value:"circle"}},
-       fillColor:{type:"DYNAMIC", options:{type:"CATEGORICAL", field:{name:"origin_class", origin:"source"}, useCustomColorPalette:true,
-                  customColorPalette:[{stop:null, color:"#6092C0"}, {stop:"exploit-like", color:"#E7664C"}],   # first entry (stop null) = every other value
-                  fieldMetaOptions:{isEnabled:true, sigma:3}}},
-       lineColor:{type:"STATIC",options:{color:"#FFFFFF"}}, lineWidth:{type:"STATIC",options:{size:1}},
-       iconSize:{type:"STATIC",options:{size:8}}}}}')
+MAP_LAYERS=$(jq -nc --argjson tip "$MAP_TOOLTIP" '
+    def src($id; $scaling): {id:($id+"-src"), type:"ES_SEARCH", geoField:"geo.location", scalingType:$scaling, limit:10000, filterByMapBounds:true,
+        applyGlobalQuery:true, applyGlobalTime:true, applyForceRefresh:true, tooltipProperties:$tip, sortField:"exploit_like", sortOrder:"desc",
+        topHitsSplitField:"", topHitsSize:1, indexPatternRefName:($id+"_index_pattern")};
+    def circle($fill; $size): {type:"VECTOR", isTimeAware:true, properties:{icon:{type:"STATIC",options:{value:"marker"}},
+        symbolizeAs:{options:{value:"circle"}}, fillColor:$fill, lineColor:{type:"STATIC",options:{color:"#FFFFFF"}},
+        lineWidth:{type:"STATIC",options:{size:1}}, iconSize:{type:"STATIC",options:{size:$size}}}};
+    [{id:"l-all", label:"All requests (clusters)", type:"BLENDED_VECTOR", visible:true, minZoom:0, maxZoom:24, alpha:0.6,
+      sourceDescriptor:src("l-all"; "CLUSTERS"), style:circle({type:"STATIC",options:{color:"#6092C0"}}; 8)},
+     {id:"l-exploit", label:"Exploit-like requests", type:"GEOJSON_VECTOR", visible:true, minZoom:0, maxZoom:24, alpha:0.95,
+      query:{query:"exploit_like:true", language:"kuery"},
+      sourceDescriptor:src("l-exploit"; "LIMIT"),
+      style:circle({type:"DYNAMIC", options:{type:"CATEGORICAL", field:{name:"origin_class", origin:"source"}, useCustomColorPalette:true,
+                    customColorPalette:[{stop:"exploit-like", color:"#E7664C"}], otherCategoryColor:"#6092C0", fieldMetaOptions:{isEnabled:true, sigma:3}}}; 9)}]')
 BASE='{"id":"basemap","label":null,"type":"EMS_VECTOR_TILE","visible":true,"minZoom":0,"maxZoom":24,"alpha":1,"locale":"autoselect","style":{"type":"EMS_VECTOR_TILE"},"sourceDescriptor":{"type":"EMS_TMS","isAutoSelect":true,"lightModeDefault":"road_map_desaturated"}}'
-LAYERS=$(jq -nc --argjson b "$BASE" --argjson l "$MAP_LAYER" '[$b,$l]')
+LAYERS=$(jq -nc --argjson b "$BASE" --argjson l "$MAP_LAYERS" '[$b] + $l')
 jq -nc --arg layers "$LAYERS" --argjson ref "$REF" '
-  {id:"m-origin", type:"map",
+  {id:"m-origin", type:"map", coreMigrationVersion:"8.8.0", typeMigrationVersion:"8.4.0",     # stamped current: no legacy migrations run on import
    attributes:{title:"Where the requests come from (red = exploit-like)", description:"",
      mapStateJSON:({zoom:1.3, center:{lon:15,lat:25}, timeFilters:{from:"now-24h",to:"now"}, refreshConfig:{isPaused:true,interval:0},
                     query:{query:"",language:"kuery"}, filters:[], settings:{autoFitToDataBounds:false, initialLocation:"LAST_SAVED_LOCATION",
                     fixedLocation:{lat:0,lon:0,zoom:2}, browserLocation:{zoom:2}, maxZoom:24, minZoom:0, showScaleControl:true,
                     showSpatialFilters:true, showTimesliderToggleButton:true}} | tostring),
      layerListJSON:$layers, uiStateJSON:"{\"isLayerTOCOpen\":true,\"openTOCDetails\":[]}"},
-   references:[{name:"l-requests_index_pattern",type:"index-pattern",id:"php2shell"}]}' >> "$OUT"
+   references:[{name:"l-all_index_pattern",type:"index-pattern",id:"php2shell"},
+               {name:"l-exploit_index_pattern",type:"index-pattern",id:"php2shell"}]}' >> "$OUT"
 
 search s-all-requests "All requests: the raw HTTP request, newest first"          'kind:"request"'                        '["src_ip","geo.country_name","tags","raw_request"]' 8
 
