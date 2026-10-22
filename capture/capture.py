@@ -60,7 +60,8 @@ EXPLOIT_TAGS = {"cmd-exec", "shell-strings", "php-wrapper", "php-cgi-arg", "webs
                 "multipart-unterminated", "multipart-nested", "oversized-body",
                 "content-length-mismatch", "te-cl-smuggling-shape", "honeytoken-reuse",
                 "session-upload-progress", "huge-field-name", "multipart-no-length", "multipart-many-headers",
-                "multipart-many-empty-files", "multipart-deep-names", "phpsessid-anomaly"}
+                "multipart-many-empty-files", "multipart-deep-names", "phpsessid-anomaly",
+                "multipart-array-spray", "exploit-tool-ua", "known-payload-host"}
 
 
 def parse_request(raw: bytes):
@@ -85,7 +86,9 @@ def parse_request(raw: bytes):
 
 # IPs Amazon's MadPot honeypots saw sending PHP2Shell attempts (17-21 Oct 2026). Informational only: they are shared anonymisation
 # infrastructure, not exclusive to this activity.
-KNOWN_EXPLOIT_IPS = {"103.216.220.92", "31.223.184.166", "37.19.200.5", "134.209.159.64", "103.114.163.188", "95.217.98.37"}
+KNOWN_EXPLOIT_IPS = {"103.216.220.92", "31.223.184.166", "37.19.200.5", "134.209.159.64", "103.114.163.188", "95.217.98.37",
+                     "45.198.224.169", "85.11.167.243"}      # the last two: sent the PoC to this honeypot on 22 Oct 2026
+KNOWN_PAYLOAD_HOSTS = (b"92.118.112.100",)                    # the host those two payloads fetch their script from
 SESSID_RE = re.compile(rb"^[A-Za-z0-9,-]{1,128}$")      # what PHP itself generates for a session id
 
 
@@ -104,6 +107,7 @@ def multipart_oom_shapes(body: bytes, boundary: bytes) -> list:
     a part with very many headers, very many empty file fields (they do not count against max_file_uploads), deeply nested
     field names. Bounded: at most 2 MB and 5000 parts are looked at."""
     tags, empty_files, many_hdr, deep = [], 0, False, False
+    array_names = {}                    # name -> how often an array-style field ("t[]") repeats: the spray of the public PoC
     for part in body.split(b"--" + boundary, 5000)[1:]:
         head = part.split(b"\r\n\r\n", 1)[0]
         if head.count(b"\n") > 50:
@@ -113,6 +117,10 @@ def multipart_oom_shapes(body: bytes, boundary: bytes) -> list:
         m = re.search(rb'name="([^"]{0,2000})"', head[:3000])
         if m and m.group(1).count(b"[") > 8:
             deep = True
+        if m and m.group(1).endswith(b"[]"):
+            array_names[m.group(1)] = array_names.get(m.group(1), 0) + 1
+    if array_names and max(array_names.values()) >= 50:
+        tags.append("multipart-array-spray")     # seen 22 Oct 2026: 150 x t[] binary blobs, each with a system() command
     if many_hdr:
         tags.append("multipart-many-headers")
     if empty_files > 50:
@@ -161,6 +169,10 @@ def analyze(method, path, headers, dup, body, truncated):
     tags += [t for t, rx in RULES if rx.search(hay)]
     if HT_RE.search(hay):
         tags.append("honeytoken-reuse")
+    if re.search(r"php2shell", headers.get("user-agent", ""), re.I):
+        tags.append("exploit-tool-ua")             # the public PoC announces itself (trivially changed, so only a hint)
+    if any(h in hay for h in KNOWN_PAYLOAD_HOSTS):
+        tags.append("known-payload-host")
     # a single form field NAME of several KB, in an ordinary urlencoded body or query string: the reported out-of-memory route
     # (legit field names are a few dozen bytes). Looks at the first 4 MB only, to bound the work.
     form_body = "x-www-form-urlencoded" in ct.lower()       # only bodies PHP parses as fields; a big binary upload is not a field name
