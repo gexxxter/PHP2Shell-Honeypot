@@ -81,6 +81,7 @@ a.lk{color:#6ea8ff;cursor:pointer;text-decoration:none}a.lk:hover{text-decoratio
 </div>
 
 <div class="card" style="margin-bottom:12px"><h2>Confirmed remote code execution</h2><div id="rce"></div></div>
+<div class="card" style="margin-bottom:12px"><h2>PHP crashes &amp; out-of-memory errors (the signal every published PHP2Shell detector watches for)</h2><div id="impact"></div></div>
 
 <div class="card" style="margin-bottom:12px"><h2>Newest exploit-like requests: the raw HTTP request, as received</h2><div id="recentreq"></div></div>
 
@@ -305,6 +306,13 @@ function render(s){
   else table('rce',['Time','Type','Detail','Suspected source request(s), last 15 s before'],
     s.rce.map((e,i) => [ (e['@timestamp']||'').replace('T',' ').slice(0,19), e.rce_type, e.cmdline||e.file||(e.dest_ip? e.dest_ip+':'+e.dest_port:'')||e.detail,
       {links: (s.suspects[i]||[]).map(x => ({text: `${x.src_ip} ${(x.geo&&x.geo.country_iso_code)||''} ${x.request_line}`, sha: x.sha256, meta: metaOf(x)}))} ]));
+
+  // PHP crashes / OOM fatals with suspected sources: did an exploit-like request push PHP into this state?
+  const ir = clear($('impact'));
+  if(!(s.impact||[]).length) ir.appendChild(el('div','empty','No PHP crash or out-of-memory fatal yet.'));
+  else table('impact',['Time','Kind','Detail','Suspected source request(s), last 15 s before'],
+    s.impact.map((e,i) => [ (e['@timestamp']||'').replace('T',' ').slice(0,19), e.kind==='php_crash'?'crash ('+(e.signal||'?')+')':'OOM ('+(e.signal||'?')+')', e.detail||e.signal||'',
+      {links: (s.impact_suspects[i]||[]).map(x => ({text: `${x.src_ip} ${(x.geo&&x.geo.country_iso_code)||''} ${x.request_line}`, sha: x.sha256, meta: metaOf(x)}))} ]));
 
   // timeline
   const tl = a.timeline.buckets; const labels = tl.map(b => new Date(b.key).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}));

@@ -147,26 +147,34 @@ def state(window):
         "size": 20, "sort": [{"@timestamp": "desc"}],
         "query": {"bool": {"filter": [{"term": {"kind": "rce_confirmed"}}]}}})
     rce_hits = [h["_source"] for h in rce.get("hits", {}).get("hits", [])]
+    # PHP crashes and out-of-memory fatals: the signal every published PHP2Shell detector watches for ("Allowed memory size
+    # exhausted", a segfaulted worker). Correlated with the preceding request the same way rce_confirmed is below.
+    impact = es(f"/{INDEX}/_search?ignore_unavailable=true", {
+        "size": 20, "sort": [{"@timestamp": "desc"}],
+        "query": {"bool": {"filter": [{"terms": {"kind": ["php_crash", "php_oom"]}}]}}})
+    impact_hits = [h["_source"] for h in impact.get("hits", {}).get("hits", [])]
     interesting = es(f"/{INDEX}/_search?ignore_unavailable=true", {         # newest exploit-like requests, for the inspector list
         "size": 30, "sort": [{"@timestamp": "desc"}],
         "_source": ["@timestamp", "src_ip", "geo.country_iso_code", "request_line", "method", "path", "tags", "body_len", "sha256", "shape_hash"],
         "query": {"bool": {"filter": [rng, {"term": {"kind": "request"}}, exploit]}}})
-    # suspected sources: requests in the 15 s before each confirmation (shared container, so it is a time correlation)
-    suspects = []
-    if rce_hits:
+    # suspected sources: requests in the 15 s before each event (shared container, so it is a time correlation)
+    def suspected_sources(hits):
+        if not hits:
+            return []
         nd = ""
-        for h in rce_hits:
+        for h in hits:
             nd += json.dumps({"index": INDEX, "ignore_unavailable": True}) + "\n"
             nd += json.dumps({"size": 4, "sort": [{"exploit_like": "desc"}, {"@timestamp": "desc"}],
                               "_source": ["@timestamp", "src_ip", "geo", "request_line", "shape_hash", "tags", "sha256"],
                               "query": {"bool": {"filter": [{"term": {"kind": "request"}}, {"range": {"@timestamp": {
                                   "gte": h["@timestamp"] + "||-15s", "lte": h["@timestamp"]}}}]}}}) + "\n"
         resp = es("/_msearch", nd, ndjson=True)
-        suspects = [[x["_source"] for x in r.get("hits", {}).get("hits", [])] for r in resp.get("responses", [])]
+        return [[x["_source"] for x in r.get("hits", {}).get("hits", [])] for r in resp.get("responses", [])]
     return {"window": window, "now": None, "total": main["hits"]["total"]["value"],
             "recent": [h["_source"] for h in main["hits"]["hits"]], "aggs": main["aggregations"],
             "shape_first": firsts.get("aggregations", {}).get("s", {}).get("buckets", []),
-            "rce": rce_hits, "suspects": suspects,
+            "rce": rce_hits, "suspects": suspected_sources(rce_hits),
+            "impact": impact_hits, "impact_suspects": suspected_sources(impact_hits),
             "interesting": [h["_source"] for h in interesting.get("hits", {}).get("hits", [])]}
 
 
